@@ -45,16 +45,15 @@ Be specific about object names.
 """
 
 LLM_EXTRACT_PROMPT = """
-Extract objects and their associated colors from the following text. Return a JSON list of [object, color, name] triplets,
-where name refers to the object, but in a way that can be detected by an image detector based on natural language descriptions.
+Extract objects and their associated colors from the following text. Return a JSON list of [object, color] pairs.
 Only include colors mentioned in the text, or if no color is specified for an object, assign it "default".
 
 Text: "<text>"
 
 JSON Format: 
 [
-["object1", "color1", "name1"],
-["object2", "color2", "name2"],
+["object1", "color1"],
+["object2", "color2"],
 ...
 ]
 """
@@ -292,7 +291,7 @@ def extract_objects_and_colors(text: str, llm_model: str = None, llm_prompt: str
 			
 			if json_start >= 0 and json_end > json_start:
 				json_str = response_text[json_start:json_end]
-				json_str = json_str.replace("'", '"').replace("\\n", "\n").replace("\\t", "\t")
+				json_str = json_str.replace("\\n", "\n").replace("\\t", "\t")  # .replace("'", '"')
 				try:
 					color_object_pairs = json.loads(json_str)
 				except json.JSONDecodeError:
@@ -564,12 +563,12 @@ def gradio_interface(image, text, llm_enhance_choice, llm_enhance_prompt, llm_ex
 		object_color_text = "\n".join(object_color_display)
 		
 		# Create a prompt for GroundingDINO
-		dino_prompt = ", ".join([obj for obj, _ in object_colors])
+		dino_prompt = ". ".join([obj for obj, _ in object_colors])
 		
 		# Detect objects with GroundingDINO
 		boxes, logits, phrases = detect_objects_with_groundingdino(temp_input_path, dino_prompt, dino_config, dino_checkpoint)
 		logger.info(f"Detected phrases: {phrases}")
-		detected_phrases = ", ".join(phrases) if len(phrases) > 0 else "No objects detected"
+		detected_phrases = ". ".join(phrases) if len(phrases) > 0 else "No objects detected"
 		
 		# If no objects detected, return original image
 		if len(boxes) == 0:
@@ -698,6 +697,9 @@ def main():
 						# Outputs
 						gr.Markdown("### Output")
 						output_image = gr.Image(type="pil", label="Annotated Image")
+						enhanced_message = gr.Textbox(label="Enhanced Text", interactive=False)
+						object_color_message = gr.Textbox(label="Object-Color Pairs", interactive=False)
+						detected_phrases_message = gr.Textbox(label="Detected Phrases", interactive=False)
 						status_message = gr.Textbox(label="Status", interactive=False)
 			
 			with gr.TabItem("How It Works"):
@@ -751,7 +753,6 @@ def main():
 				""")
 			
 		# Set up examples
-
 		example_text_description = """
 The wings of the eagle and the clipeus-bearing Erotes are painted with two shades of red: crimson-red and ochre-red, identified through analysis as hematite.
 The short feathers of the Erotes were painted in the grooved areas with Egyptian blue, creating a chiaroscuro effect with the two reds.
@@ -769,7 +770,7 @@ The corner holes of the eyes of the group on the right (of the sarcophagus), dep
 		gr.Examples(
 			examples=examples,
 			inputs=[input_image, input_text, llm_enhance_choice, llm_enhance_prompt, llm_extract_choice, llm_extract_prompt, dino_choice, sam_choice, threshold_box, threshold_text],
-			outputs=[output_image, status_message],
+			outputs=[output_image, enhanced_message, object_color_message, detected_phrases_message, status_message],
 			fn=gradio_interface,
 			cache_examples=False
 		)
@@ -778,7 +779,7 @@ The corner holes of the eyes of the group on the right (of the sarcophagus), dep
 		submit_btn.click(
 			fn=gradio_interface,
 			inputs=[input_image, input_text, llm_enhance_choice, llm_enhance_prompt, llm_extract_choice, llm_extract_prompt, dino_choice, sam_choice, threshold_box, threshold_text],
-			outputs=[output_image, status_message]
+			outputs=[output_image, enhanced_message, object_color_message, detected_phrases_message, status_message],
 		)
 		
 	# Launch the app
