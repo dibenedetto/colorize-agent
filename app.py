@@ -4,8 +4,6 @@ import numpy as np
 import gradio as gr
 from PIL import Image, ImageDraw
 from transformers import pipeline
-import matplotlib.pyplot as plt
-import matplotlib.patches as patches
 from groundingdino.util.inference import load_model, load_image, predict
 from segment_anything import sam_model_registry, SamPredictor
 from typing import List, Tuple
@@ -550,7 +548,7 @@ def gradio_interface(image, text, llm_enhance_choice, llm_enhance_prompt, llm_ex
 		logger.info(f"Enhanced text: {enhanced_text}")
 		
 		# Extract objects and colors from text
-		object_colors = extract_objects_and_colors(enhanced_text, llm_extract_model, llm_extract_prompt)
+		object_colors = [["wings", "white"]] if llm_extract_choice == "None" else extract_objects_and_colors(enhanced_text, llm_extract_model, llm_extract_prompt)
 		logger.info(f"Detected objects and colors: {object_colors}")
 		if len(object_colors) == 0:
 			logger.warning("No object-color pairs detected")
@@ -587,7 +585,7 @@ def gradio_interface(image, text, llm_enhance_choice, llm_enhance_prompt, llm_ex
 		result_pil = Image.fromarray(annotated_image)
 		
 		return (result_pil, enhanced_text, object_color_text, detected_phrases,
-				f"Processing complete with {loaded_llm_enhance_model}, {loaded_llm_extract_model}, {dino_choice}, and {sam_choice}")
+				f"Processing complete with {loaded_llm_enhance_model}, {loaded_llm_extract_model}, {dino_choice}, and {sam_choice}.")
 	except Exception as e:
 		logger.error(f"Error in gradio_interface: {e}")
 		# Return original image with error text
@@ -605,7 +603,7 @@ def create_model_options_grid():
 	"""
 	with gr.Row():
 		llm_enhance_choice = gr.Dropdown(
-			choices=["None"] + list(LLM_OPTIONS.keys()),
+			choices=["None"]+list(LLM_OPTIONS.keys()),
 			value="Default",
 			label="LLM Enhance Model"
 		)
@@ -618,14 +616,14 @@ def create_model_options_grid():
 
 	with gr.Row():
 		llm_extract_choice = gr.Dropdown(
-			choices=list(LLM_OPTIONS.keys()),
+			choices=["None"]+list(LLM_OPTIONS.keys()),
 			value="Default",
 			label="LLM Extract Model"
 		)
 	
 		llm_extract_prompt = gr.Textbox(
 			lines=4, 
-			value = LLM_EXTRACT_PROMPT,
+			value=LLM_EXTRACT_PROMPT,
 			label="Extract Prompt"
 		)
 
@@ -688,7 +686,6 @@ def main():
 						)
 						
 						# Model selection
-						gr.Markdown("### Settings")
 						llm_enhance_choice, llm_enhance_prompt, llm_extract_choice, llm_extract_prompt, dino_choice, sam_choice, threshold_box, threshold_text = create_model_options_grid()
 						
 						# Process button
@@ -698,8 +695,11 @@ def main():
 						# Outputs
 						gr.Markdown("### Output")
 						output_image = gr.Image(type="pil", label="Annotated Image")
+						enhanced_text = gr.Textbox(label="Enhanced Text", interactive=False)
+						object_color_text = gr.Textbox(label="Object-Color Pairs", interactive=False)
+						detected_phrases = gr.Textbox(label="Detected Phrases", interactive=False)
 						status_message = gr.Textbox(label="Status", interactive=False)
-			
+
 			with gr.TabItem("How It Works"):
 				gr.Markdown("""
 				## How to use:
@@ -763,22 +763,22 @@ The corner holes of the eyes of the group on the right (of the sarcophagus), dep
 		examples = [
 			# ["example_image.jpg", "a red car and blue sky", "Default", LLM_ENHANCE_PROMPT, "Default", LLM_EXTRACT_PROMPT, "Swin-T", "ViT-H", 0.35, 0.25],
 			# ["example_image2.jpg", "yellow dog and green grass", "GPT-2", LLM_ENHANCE_PROMPT, "GPT-2", LLM_EXTRACT_PROMPT, "Swin-T", "ViT-B", 0.3, 0.2]            
-			["example.jpg", example_text_description, "None", LLM_ENHANCE_PROMPT, "Mistral-7B", LLM_EXTRACT_PROMPT, "Swin-T", "ViT-H", 0.3, 0.2]
+			["example.jpg", example_text_description, "None", LLM_ENHANCE_PROMPT, "None", LLM_EXTRACT_PROMPT, "Swin-T", "ViT-H", 0.3, 0.2]
 		]
 		
 		gr.Examples(
 			examples=examples,
 			inputs=[input_image, input_text, llm_enhance_choice, llm_enhance_prompt, llm_extract_choice, llm_extract_prompt, dino_choice, sam_choice, threshold_box, threshold_text],
-			outputs=[output_image, status_message],
+			outputs=[output_image, enhanced_text, object_color_text, detected_phrases, status_message],
 			fn=gradio_interface,
 			cache_examples=False
 		)
-		
+
 		# Connect the button to the function
 		submit_btn.click(
 			fn=gradio_interface,
 			inputs=[input_image, input_text, llm_enhance_choice, llm_enhance_prompt, llm_extract_choice, llm_extract_prompt, dino_choice, sam_choice, threshold_box, threshold_text],
-			outputs=[output_image, status_message]
+			outputs=[output_image, enhanced_text, object_color_text, detected_phrases, status_message],
 		)
 		
 	# Launch the app
