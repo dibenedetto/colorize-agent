@@ -20,7 +20,7 @@ class ColorizeAgent:
 	DEFAULT_SEGMENTATION_MODEL       = SemanticSegmentation .DEFAULT_MODEL
 	DEFAULT_SEGMENTATION_REFINEMENT  = SemanticSegmentation .DEFAULT_REFINEMENT
 	DEFAULT_ANNOTATION               = True
-	DEFAULT_GENERATE_3D              = True
+	DEFAULT_3D_OBJECT                = Model3DGeneration    .DEFAULT_3D_OBJECT
 
 
 	def __init__(self):
@@ -171,13 +171,13 @@ class ColorizeAgent:
 				annotated_image = np.array(image)
 
 		if True:
+			model_3d = ColorizeAgent.DEFAULT_3D_OBJECT
+
 			if generate_3d is None:
-				generate_3d = ColorizeAgent.DEFAULT_GENERATE_3D
+				generate_3d = ColorizeAgent.DEFAULT_3D_OBJECT
 
 			if generate_3d and self._model3d is not None and self._model3d.is_valid:
 				model_3d = self._model3d(image)
-
-			model_3d = "unit_cube.obj"
 
 		return annotated_image, model_3d, parts, detection_results
 

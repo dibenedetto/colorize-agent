@@ -6,7 +6,8 @@ from utils import DetectionResult
 
 class Model3DGeneration:
 
-	DEFAULT_MODEL = "IDEA-Research/grounding-dino-tiny"
+	DEFAULT_MODEL     = "IDEA-Research/grounding-dino-tiny"
+	DEFAULT_3D_OBJECT = "default_model.obj"
 
 
 	def __init__(self):
@@ -68,7 +69,7 @@ class Model3DGeneration:
 
 		# return results
 
-		return 
+		return Model3DGeneration.DEFAULT_3D_OBJECT
 
 
 	def __call__(self, image):
