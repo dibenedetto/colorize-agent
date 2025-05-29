@@ -145,13 +145,19 @@ async def gradio_interface(image, text, search_web, llm_choice, llm_instructions
 		annotate           = True
 
 		annotated_image, parts, detection_results = await g_agent(image=image, text=text, detection_threshold=threshold_box, polygon_refinement=polygon_refinement, annotate=annotate)
+
+		for res in detection_results:
+			if res.label.endswith("."):
+				res.label = res.label[:-1]
+		detection_results = sorted(detection_results, key=lambda x: x.label)
+
 		labels = [res.label for res in detection_results]
 
 		status = f"Success: operating on {g_agent.llm_agent.model_name}, {g_agent.detection.model_name}, {g_agent.segmentation.model_name}."
 
 		sources = parts
 
-		return annotated_image, sources, parts, labels, status
+		return annotated_image, parts, labels, sources, status
 
 	except Exception as e:
 		status = f"Error: {e}"
@@ -194,9 +200,9 @@ def main():
 					with gr.Column(scale=1):
 						gr.Markdown("### Output")
 						output_image   = gr.Image(type="pil", label="Annotated Image")
+						output_parts   = gr.Dataframe(label="Parts", headers=['Description', 'Appearance', 'Simplified'])
+						output_labels  = gr.Dataframe(label="Labels", headers=['Labels'])
 						output_sources = gr.Textbox(label="Sources", interactive=False)
-						output_parts   = gr.Textbox(label="Parts", interactive=False)
-						output_labels  = gr.Textbox(label="Labels", interactive=False)
 						output_status  = gr.Textbox(label="Status", interactive=False)
 
 			with gr.TabItem("How It Works"):
@@ -260,7 +266,7 @@ The corner holes of the eyes of the group on the right (of the sarcophagus), dep
 			gr.Examples(
 				examples=examples,
 				inputs=[input_image, input_text, input_search_web, llm_choice, llm_instructions, llm_temperature, llm_max_out_tokens, detection_choice, detection_box_threshold, detection_text_threshold, segmentation_choice, segmentation_refinement],
-				outputs=[output_image, output_sources, output_parts, output_labels, output_status],
+				outputs=[output_image, output_parts, output_labels, output_sources, output_status],
 				fn=gradio_interface,
 				cache_examples=False
 			)
@@ -268,7 +274,7 @@ The corner holes of the eyes of the group on the right (of the sarcophagus), dep
 		submit_btn.click(
 			fn=gradio_interface,
 			inputs=[input_image, input_text, input_search_web, llm_choice, llm_instructions, llm_temperature, llm_max_out_tokens, detection_choice, detection_box_threshold, detection_text_threshold, segmentation_choice, segmentation_refinement],
-			outputs=[output_image, output_sources, output_parts, output_labels, output_status],
+			outputs=[output_image, output_parts, output_labels, output_sources, output_status],
 		)
 
 	demo.launch()
