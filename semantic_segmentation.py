@@ -4,10 +4,10 @@ from transformers import AutoModel, AutoProcessor
 from utils import DetectionResult, get_boxes, refine_masks
 
 
-class SemanticSegmenter:
+class SemanticSegmentation:
 
-	DEFAULT_MODEL              = "facebook/sam-vit-base"
-	DEFAULT_POLYGON_REFINEMENT = True
+	DEFAULT_MODEL      = "facebook/sam-vit-base"
+	DEFAULT_REFINEMENT = True
 
 
 	def __init__(self):
@@ -26,7 +26,7 @@ class SemanticSegmenter:
 
 	def setup(self, model=None, api_key=None, **kwargs):
 		if model is None:
-			model = SemanticSegmenter.DEFAULT_MODEL
+			model = SemanticSegmentation.DEFAULT_MODEL
 		
 		if model == self._model\
 			and api_key == self._api_key \
@@ -59,7 +59,7 @@ class SemanticSegmenter:
 		self._segmenter = None
 
 
-	def run(self, image, detection_results=None, polygon_refinement=None):
+	def run(self, image, detection_results=None, refinement=None):
 		if not self.is_valid:
 			raise ValueError("SemanticSegmenter is not valid. Please call setup() first.")
 
@@ -73,10 +73,10 @@ class SemanticSegmenter:
 			reshaped_input_sizes=inputs.reshaped_input_sizes
 		)[0]
 
-		if polygon_refinement is None:
-			polygon_refinement = SemanticSegmenter.DEFAULT_POLYGON_REFINEMENT
+		if refinement is None:
+			refinement = SemanticSegmentation.DEFAULT_REFINEMENT
 
-		masks = refine_masks(masks, polygon_refinement)
+		masks = refine_masks(masks, refinement)
 
 		if not boxes:
 			detection_results = [DetectionResult() for _ in range(len(masks))]
@@ -87,5 +87,5 @@ class SemanticSegmenter:
 		return detection_results
 
 
-	def __call__(self, image, detection_results, polygon_refinement):
-		return self.run(image, detection_results, polygon_refinement)
+	def __call__(self, image, detection_results, refinement):
+		return self.run(image, detection_results, refinement)

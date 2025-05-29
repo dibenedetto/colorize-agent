@@ -4,7 +4,7 @@ from transformers import pipeline
 from utils import DetectionResult
 
 
-class GroundingDetector:
+class GroundingDetection:
 
 	DEFAULT_MODEL          = "IDEA-Research/grounding-dino-tiny"
 	DEFAULT_BOX_THRESHOLD  = 0.2
@@ -27,7 +27,7 @@ class GroundingDetector:
 
 	def setup(self, model=None, api_key=None, **kwargs):
 		if model is None:
-			model = GroundingDetector.DEFAULT_MODEL
+			model = GroundingDetection.DEFAULT_MODEL
 		
 		if model == self._model\
 			and api_key == self._api_key \
@@ -61,9 +61,9 @@ class GroundingDetector:
 
 		labels = [label if label.endswith(".") else label + "." for label in labels]
 		if box_threshold is None:
-			box_threshold = GroundingDetector.DEFAULT_BOX_THRESHOLD
+			box_threshold = GroundingDetection.DEFAULT_BOX_THRESHOLD
 		if text_threshold is None:
-			text_threshold = GroundingDetector.DEFAULT_TEXT_THRESHOLD
+			text_threshold = GroundingDetection.DEFAULT_TEXT_THRESHOLD
 
 		results = self._detector(image, candidate_labels=labels, threshold=box_threshold)
 		results = [DetectionResult.from_dict(result) for result in results]

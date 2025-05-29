@@ -3,8 +3,7 @@ import numpy as np
 import gradio as gr
 from dotenv import load_dotenv
 
-from openai import AsyncOpenAI
-from agents import WebSearchTool, set_default_openai_client, set_default_openai_key
+from agents import WebSearchTool, set_default_openai_key
 
 from colorize_agent import ColorizeAgent
 
@@ -15,10 +14,10 @@ load_dotenv()
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 if OPENAI_API_KEY:
 	set_default_openai_key(OPENAI_API_KEY)
-	# set_default_openai_client(AsyncOpenAI(api_key=OPENAI_API_KEY))
+
 HF_API_KEY = os.getenv("HF_API_KEY")
 
-
+LLM_SEARCH_WEB           = False
 LLM_TEMPERATURE          = ColorizeAgent.DEFAULT_LLM_TEMPERATURE
 LLM_MAX_OUT_TOKENS       = ColorizeAgent.DEFAULT_LLM_MAX_OUT_TOKENS
 DETECTION_BOX_THRESHOLD  = ColorizeAgent.DEFAULT_DETECTION_BOX_THRESHOLD
@@ -123,7 +122,7 @@ def create_model_options_grid():
 	return llm_choice, llm_instructions, llm_temperature, llm_max_out_tokens, detection_choice, detection_box_threshold, detection_text_threshold, segmentation_choice, segmentation_refine
 
 
-async def gradio_interface(image, text, llm_choice, llm_instructions, llm_temperature, llm_max_out_tokens, detection_choice, threshold_box, threshold_text, segmentation_choice, segmentation_refine):
+async def gradio_interface(image, text, search_web, llm_choice, llm_instructions, llm_temperature, llm_max_out_tokens, detection_choice, threshold_box, threshold_text, segmentation_choice, segmentation_refine):
 	try:
 		llm_model          = LLM_OPTIONS.get(llm_choice)
 		llm_temperature    = float(llm_temperature)
@@ -150,10 +149,13 @@ async def gradio_interface(image, text, llm_choice, llm_instructions, llm_temper
 
 		status = f"Success: operating on {g_agent.llm_agent.model_name}, {g_agent.detection.model_name}, {g_agent.segmentation.model_name}."
 
-		return annotated_image, parts, labels, status
+		sources = parts
+
+		return annotated_image, sources, parts, labels, status
 
 	except Exception as e:
-		return image, [], [], f"Error: {e}"
+		status = f"Error: {e}"
+		return image, [], [], [], status
 
 	finally:
 		pass
@@ -180,6 +182,10 @@ def main():
 							placeholder="Describe objects to detect and their colors (e.g., 'a red car, blue sky, green trees')", 
 							label="Text Description"
 						)
+						input_search_web = gr.Checkbox(
+							value=LLM_SEARCH_WEB,
+							label="Search Web",
+						)
 
 						llm_choice, llm_instructions, llm_temperature, llm_max_out_tokens, detection_choice, detection_box_threshold, detection_text_threshold, segmentation_choice, segmentation_refinement = create_model_options_grid()
 
@@ -187,10 +193,11 @@ def main():
 
 					with gr.Column(scale=1):
 						gr.Markdown("### Output")
-						output_image  = gr.Image(type="pil", label="Annotated Image")
-						output_parts  = gr.Textbox(label="Parts", interactive=False)
-						output_labels = gr.Textbox(label="Labels", interactive=False)
-						output_status = gr.Textbox(label="Status", interactive=False)
+						output_image   = gr.Image(type="pil", label="Annotated Image")
+						output_sources = gr.Textbox(label="Sources", interactive=False)
+						output_parts   = gr.Textbox(label="Parts", interactive=False)
+						output_labels  = gr.Textbox(label="Labels", interactive=False)
+						output_status  = gr.Textbox(label="Status", interactive=False)
 
 			with gr.TabItem("How It Works"):
 				gr.Markdown("""
@@ -244,23 +251,24 @@ The painting is executed with fine and elegant brushstrokes, meticulous and atte
 Tellus’ headband, the strings of Achilles’ lyre, and the tail of the centaur on the right side of the sarcophagus were painted in ochre-red.
 The corner holes of the eyes of the group on the right (of the sarcophagus), depicting Chiron and Achilles, as well as those of Oceanus and Tellus, were painted in crimson-red, while the outlines of the irises of the two Erotes were rendered in ochre red; the pupils are black.
 			"""
+			example_search_web = True
 
 			examples = [
-				[example_image, example_text, "Default", LLM_INSTRUCTIONS, LLM_TEMPERATURE, LLM_MAX_OUT_TOKENS, "Default", DETECTION_BOX_THRESHOLD, DETECTION_TEXT_THRESHOLD, "Default"],
+				[example_image, example_text, example_search_web, "Default", LLM_INSTRUCTIONS, LLM_TEMPERATURE, LLM_MAX_OUT_TOKENS, "Default", DETECTION_BOX_THRESHOLD, DETECTION_TEXT_THRESHOLD, "Default", SEGMENTATION_REFINEMENT],
 			]
 
 			gr.Examples(
 				examples=examples,
-				inputs=[input_image, input_text, llm_choice, llm_instructions, llm_temperature, llm_max_out_tokens, detection_choice, detection_box_threshold, detection_text_threshold, segmentation_choice, segmentation_refinement],
-				outputs=[output_image, output_parts, output_labels, output_status],
+				inputs=[input_image, input_text, input_search_web, llm_choice, llm_instructions, llm_temperature, llm_max_out_tokens, detection_choice, detection_box_threshold, detection_text_threshold, segmentation_choice, segmentation_refinement],
+				outputs=[output_image, output_sources, output_parts, output_labels, output_status],
 				fn=gradio_interface,
 				cache_examples=False
 			)
 
 		submit_btn.click(
 			fn=gradio_interface,
-			inputs=[input_image, input_text, llm_choice, llm_instructions, llm_temperature, llm_max_out_tokens, detection_choice, detection_box_threshold, detection_text_threshold, segmentation_choice, segmentation_refinement],
-			outputs=[output_image, output_parts, output_labels, output_status],
+			inputs=[input_image, input_text, input_search_web, llm_choice, llm_instructions, llm_temperature, llm_max_out_tokens, detection_choice, detection_box_threshold, detection_text_threshold, segmentation_choice, segmentation_refinement],
+			outputs=[output_image, output_sources, output_parts, output_labels, output_status],
 		)
 
 	demo.launch()
