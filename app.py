@@ -6,6 +6,7 @@ from dotenv import load_dotenv
 from agents import WebSearchTool, set_default_openai_key
 
 from colorize_agent import ColorizeAgent
+from utils import make_model_3d
 
 
 load_dotenv()
@@ -151,17 +152,16 @@ async def gradio_interface(image, text, search_web, llm_choice, llm_instructions
 				res.label = res.label[:-1]
 		detection_results = sorted(detection_results, key=lambda x: x.label)
 
-		labels = [res.label for res in detection_results]
+		labels   = [res.label for res in detection_results]
+		status   = f"Success: operating on {g_agent.llm_agent.model_name}, {g_agent.detection.model_name}, {g_agent.segmentation.model_name}."
+		sources  = parts
+		model_3d = make_model_3d(image, detection_results)
 
-		status = f"Success: operating on {g_agent.llm_agent.model_name}, {g_agent.detection.model_name}, {g_agent.segmentation.model_name}."
-
-		sources = parts
-
-		return annotated_image, parts, labels, sources, status
+		return annotated_image, model_3d, parts, labels, sources, status
 
 	except Exception as e:
 		status = f"Error: {e}"
-		return image, [], [], [], status
+		return image, None, [], [], [], status
 
 	finally:
 		pass
@@ -200,6 +200,7 @@ def main():
 					with gr.Column(scale=1):
 						gr.Markdown("### Output")
 						output_image   = gr.Image(type="pil", label="Annotated Image")
+						output_3d      = gr.Model3D(label="3D Object")
 						output_parts   = gr.Dataframe(label="Parts", headers=['Description', 'Appearance', 'Simplified'])
 						output_labels  = gr.Dataframe(label="Labels", headers=['Labels'])
 						output_sources = gr.Textbox(label="Sources", interactive=False)
@@ -266,7 +267,7 @@ The corner holes of the eyes of the group on the right (of the sarcophagus), dep
 			gr.Examples(
 				examples=examples,
 				inputs=[input_image, input_text, input_search_web, llm_choice, llm_instructions, llm_temperature, llm_max_out_tokens, detection_choice, detection_box_threshold, detection_text_threshold, segmentation_choice, segmentation_refinement],
-				outputs=[output_image, output_parts, output_labels, output_sources, output_status],
+				outputs=[output_image, output_3d, output_parts, output_labels, output_sources, output_status],
 				fn=gradio_interface,
 				cache_examples=False
 			)
@@ -274,7 +275,7 @@ The corner holes of the eyes of the group on the right (of the sarcophagus), dep
 		submit_btn.click(
 			fn=gradio_interface,
 			inputs=[input_image, input_text, input_search_web, llm_choice, llm_instructions, llm_temperature, llm_max_out_tokens, detection_choice, detection_box_threshold, detection_text_threshold, segmentation_choice, segmentation_refinement],
-			outputs=[output_image, output_parts, output_labels, output_sources, output_status],
+			outputs=[output_image, output_3d, output_parts, output_labels, output_sources, output_status],
 		)
 
 	demo.launch()

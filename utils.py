@@ -279,6 +279,10 @@ def refine_masks(masks: torch.BoolTensor, polygon_refinement: bool = False) -> L
 	return masks
 
 
+def make_model_3d(image, detection_results):
+	return "unit_cube.obj"
+
+
 # def detect(
 # 	image: Image.Image,
 # 	labels: List[str],
