@@ -280,6 +280,7 @@ def refine_masks(masks: torch.BoolTensor, polygon_refinement: bool = False) -> L
 
 
 def make_model_3d(image, detection_results):
+	# https://huggingface.co/docs/transformers/en/model_doc/depth_anything?usage=Pipeline
 	return "unit_cube.obj"
 
 

@@ -57,7 +57,7 @@ class GroundingDetection:
 
 	def run(self, image, labels, box_threshold=None, text_threshold=None):
 		if not self.is_valid:
-			raise ValueError("GroundingDetector is not valid. Please call setup() first.")
+			raise ValueError("GroundingDetection is not valid. Please call setup() first.")
 
 		labels = [label if label.endswith(".") else label + "." for label in labels]
 		if box_threshold is None:

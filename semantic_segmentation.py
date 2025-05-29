@@ -61,7 +61,7 @@ class SemanticSegmentation:
 
 	def run(self, image, detection_results=None, refinement=None):
 		if not self.is_valid:
-			raise ValueError("SemanticSegmenter is not valid. Please call setup() first.")
+			raise ValueError("SemanticSegmentation is not valid. Please call setup() first.")
 
 		boxes   = get_boxes(detection_results) if detection_results is not None else None
 		inputs  = self._processor(images=image, input_boxes=boxes, return_tensors="pt").to(self._device)

@@ -145,7 +145,7 @@ async def gradio_interface(image, text, search_web, llm_choice, llm_instructions
 		polygon_refinement = segmentation_refine
 		annotate           = True
 
-		annotated_image, parts, detection_results = await g_agent(image=image, text=text, detection_threshold=threshold_box, polygon_refinement=polygon_refinement, annotate=annotate)
+		annotated_image, model_3d, parts, detection_results = await g_agent(image=image, text=text, detection_threshold=threshold_box, polygon_refinement=polygon_refinement, annotate=annotate)
 
 		for res in detection_results:
 			if res.label.endswith("."):
@@ -155,7 +155,6 @@ async def gradio_interface(image, text, search_web, llm_choice, llm_instructions
 		labels   = [res.label for res in detection_results]
 		status   = f"Success: operating on {g_agent.llm_agent.model_name}, {g_agent.detection.model_name}, {g_agent.segmentation.model_name}."
 		sources  = parts
-		model_3d = make_model_3d(image, detection_results)
 
 		return annotated_image, model_3d, parts, labels, sources, status
 
@@ -165,6 +164,13 @@ async def gradio_interface(image, text, search_web, llm_choice, llm_instructions
 
 	finally:
 		pass
+
+
+def search_image(image):
+	if not image:
+		return "No image provided for web search."
+
+	return "INVALID"
 
 
 def main():
@@ -188,10 +194,25 @@ def main():
 							placeholder="Describe objects to detect and their colors (e.g., 'a red car, blue sky, green trees')", 
 							label="Text Description"
 						)
-						input_search_web = gr.Checkbox(
-							value=LLM_SEARCH_WEB,
-							label="Search Web",
-						)
+
+						with gr.Row():
+							input_search_web = gr.Checkbox(
+								value=LLM_SEARCH_WEB,
+								label="Search Web",
+							)
+
+							output_search_web = gr.Textbox(
+								lines=2, 
+								placeholder="Web search description (optional)",
+								label="Web Search Description"
+							)
+
+							search_web_btn = gr.Button("Search Web", variant="primary")
+							search_web_btn.click(
+								fn=search_image,
+								inputs=[input_image],
+								outputs=[output_search_web],
+							)
 
 						llm_choice, llm_instructions, llm_temperature, llm_max_out_tokens, detection_choice, detection_box_threshold, detection_text_threshold, segmentation_choice, segmentation_refinement = create_model_options_grid()
 

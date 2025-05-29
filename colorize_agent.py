@@ -4,6 +4,7 @@ import numpy as np
 from llm_agent             import LLMAgent
 from grounding_detection   import GroundingDetection
 from semantic_segmentation import SemanticSegmentation
+from model_3d_generation   import Model3DGeneration
 from utils                 import annotate_image
 
 
@@ -19,12 +20,14 @@ class ColorizeAgent:
 	DEFAULT_SEGMENTATION_MODEL       = SemanticSegmentation .DEFAULT_MODEL
 	DEFAULT_SEGMENTATION_REFINEMENT  = SemanticSegmentation .DEFAULT_REFINEMENT
 	DEFAULT_ANNOTATION               = True
+	DEFAULT_GENERATE_3D              = True
 
 
 	def __init__(self):
 		self._llm_agent    = None
 		self._detection    = None
 		self._segmentation = None
+		self._model3d      = None
 
 
 	def _parse_parts(self, response):
@@ -62,10 +65,16 @@ class ColorizeAgent:
 		return self._segmentation
 
 
+	@property
+	def model3d(self):
+		return self._model3d
+
+
 	def setup(self,
 		llm_model=None, llm_api_key=None, llm_instructions=None, llm_temperature=None, llm_max_out_tokens=None, llm_kwargs=None,
 		detection_model=None, detection_api_key=None, detection_kwargs=None,
 		segmentation_model=None, segmentation_api_key=None, segmentation_kwargs=None,
+		model3d_model=None, model3d_api_key=None, model3d_kwargs=None,
 	):
 		if self._llm_agent is None:
 			self._llm_agent = LLMAgent()
@@ -94,6 +103,14 @@ class ColorizeAgent:
 			**(segmentation_kwargs or {}),
 		)
 
+		if self._model3d is None:
+			self._model3d = Model3DGeneration()
+		self._model3d.setup(
+			model   = model3d_model,
+			api_key = model3d_api_key,
+			**(model3d_kwargs or {}),
+		)
+
 		return True
 
 
@@ -110,14 +127,19 @@ class ColorizeAgent:
 			self._segmentation.cleanup()
 			self._segmentation = None
 
+		if self._model3d is not None:
+			self._model3d.cleanup()
+			self._model3d = None
 
-	async def run(self, image, text=None, detection_box_threshold=None, detection_text_threshold=None, segmentation_refinement=None, annotate=None):
+
+	async def run(self, image, text=None, detection_box_threshold=None, detection_text_threshold=None, segmentation_refinement=None, annotate=None, generate_3d=None):
 		annotated_image   = None
+		model_3d          = None
 		parts             = []
 		detection_results = []
 
 		if not image or not self.is_valid:
-			return annotated_image, parts, detection_results
+			return annotated_image, model_3d, parts, detection_results
 
 		if True:
 			if text is not None and self._llm_agent is not None and self._llm_agent.is_valid:
@@ -148,7 +170,16 @@ class ColorizeAgent:
 			else:
 				annotated_image = np.array(image)
 
-		return annotated_image, parts, detection_results
+		if True:
+			if generate_3d is None:
+				generate_3d = ColorizeAgent.DEFAULT_GENERATE_3D
+
+			if generate_3d and self._model3d is not None and self._model3d.is_valid:
+				model_3d = self._model3d(image)
+
+			model_3d = "unit_cube.obj"
+
+		return annotated_image, model_3d, parts, detection_results
 
 
 	def __call__(self, image, text=None, detection_threshold=None, polygon_refinement=None, annotate=None):
