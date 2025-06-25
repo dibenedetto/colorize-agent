@@ -4,6 +4,7 @@ import math
 import numpy as np
 import os
 import random
+import re
 import shutil
 import torch
 import torch.nn as nn
@@ -19,9 +20,10 @@ from transformers import AutoProcessor, AutoModel, AutoModelForZeroShotObjectDet
 from typing import List, Dict, Tuple, Optional, Union
 
 
-DEFAULT_SEED       = 42
-DEFAULT_TEST_SIZE  = 0.2
-DEFAULT_DINO_MODEL = "IDEA-Research/grounding-dino-base"
+DEFAULT_SEED            = 42
+DEFAULT_TEST_SIZE       = 0.2
+DEFAULT_DINO_MODEL      = "IDEA-Research/grounding-dino-base"
+DEFAULT_ADVANCED_LAYERS = True
 
 
 def manual_seed(seed=DEFAULT_SEED):
@@ -262,7 +264,7 @@ class LoRAManager:
 	"""Manages LoRA adapters for the model"""
 	
 	def __init__(self, model: nn.Module, target_modules: List[str], rank: int = 4, alpha: float = 1.0,
-				adaptive: bool = False, max_rank: int = 16):
+				adaptive: bool = False, max_rank: int = 16, use_regexp: bool = False):
 		self.model = model
 		self.target_modules = target_modules
 		self.rank = rank
@@ -271,13 +273,18 @@ class LoRAManager:
 		self.max_rank = max_rank
 		self.lora_layers = {}
 
-		self.apply_lora()
+		self.apply_lora(use_regexp)
 
 
-	def apply_lora(self):
+	def apply_lora(self, use_regexp=False):
 		"""Apply LoRA to specified modules"""
+
 		for name, module in self.model.named_modules():
-			if any(target in name for target in self.target_modules):
+			if use_regexp:
+				matches_pattern = any(re.match(pattern, name) for pattern in self.target_modules)
+			else:
+				matches_pattern = any(target in name for target in self.target_modules)
+			if matches_pattern:
 				if isinstance(module, (nn.Linear, nn.Conv2d)):
 					# Create LoRA layer - use AdaptiveLoRA if specified
 					if self.adaptive:
@@ -598,7 +605,8 @@ class GroundingDINOLoRAFineTuner:
 	
 	def __init__(self, model_name: str = DEFAULT_DINO_MODEL, 
 				lora_rank: int = 8, lora_alpha: float = 16.0, 
-				adaptive_lora: bool = True, max_rank: int = 16):
+				adaptive_lora: bool = True, max_rank: int = 16, 
+				advanced_layers: bool = DEFAULT_ADVANCED_LAYERS):
 		self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 		self.processor = AutoProcessor.from_pretrained(model_name)
 		# self.model = AutoModel.from_pretrained(model_name)
@@ -607,19 +615,49 @@ class GroundingDINOLoRAFineTuner:
 		# Initialize detection loss
 		self.criterion = DetectionLoss()
 
-		# Apply LoRA to specific modules (updated for GroundingDINO architecture)
-		self.lora_manager = LoRAManager(
-			model=self.model,
-			target_modules=[
+		if advanced_layers:
+			# Common attention and linear layer patterns
+			attention_patterns = [
+				r'.*self_attn\.q_proj$',
+				r'.*self_attn\.k_proj$', 
+				r'.*self_attn\.v_proj$',
+				r'.*self_attn\.out_proj$',
+				r'.*cross_attn\.q_proj$',
+				r'.*cross_attn\.k_proj$',
+				r'.*cross_attn\.v_proj$',
+				r'.*cross_attn\.out_proj$',
+				r'.*multihead_attn\.q_proj$',
+				r'.*multihead_attn\.k_proj$',
+				r'.*multihead_attn\.v_proj$',
+				r'.*multihead_attn\.out_proj$'
+			]
+
+			linear_patterns = [
+				r'.*linear1$',
+				r'.*linear2$',
+				r'.*fc1$',
+				r'.*fc2$',
+				r'.*ffn\.layers\.\d+$'
+			]
+
+			target_modules = attention_patterns + linear_patterns
+		else:
+			target_modules = [
 				"self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj", "self_attn.out_proj",
 				"cross_attn.q_proj", "cross_attn.k_proj", "cross_attn.v_proj", "cross_attn.out_proj",
 				"linear1", "linear2",  # FFN layers
 				"bbox_embed", "class_embed"  # Output heads
-			],
+			]
+
+		# Apply LoRA to specific modules (updated for GroundingDINO architecture)
+		self.lora_manager = LoRAManager(
+			model=self.model,
+			target_modules=target_modules,
 			rank=lora_rank,
 			alpha=lora_alpha,
 			adaptive=adaptive_lora,
-			max_rank=max_rank
+			max_rank=max_rank,
+			use_regexp=advanced_layers
 		)
 
 		self.model.to(self.device)
@@ -973,14 +1011,13 @@ def train():
 		data_path = f"{base_path}/dataset.json"
 		build_dataset(data_path, train_path, validation_path)
 
-	label_to_id = build_label_mapping_from_files(train_path, validation_path)
-
 	# Initialize LoRA fine-tuner with AdaptiveLoRA
 	fine_tuner = GroundingDINOLoRAFineTuner(
 		lora_rank=8,          # Base rank (not used for AdaptiveLoRA)
 		lora_alpha=16.0,      # Higher alpha for stronger adaptation
 		adaptive_lora=True,   # Use AdaptiveLoRA
-		max_rank=16           # Maximum rank for adaptive selection
+		max_rank=16,          # Maximum rank for adaptive selection
+		advanced_layers=DEFAULT_ADVANCED_LAYERS,
 	)
 
 	# Fine-tune with LoRA
@@ -993,6 +1030,7 @@ def train():
 		batch_size=1,
 		warmup_epochs=5   # Warmup for stable training
 	)
+	print("Fine-tune loss: ", best_loss)
 
 	# Load best weights and run inference
 	if os.path.exists("best_lora_weights.pt"):
@@ -1012,7 +1050,190 @@ def train():
 		print("No test image found for inference")
 
 
+
+
+
+
+# import re
+
+
+# def get_lora_target_layers(model: nn.Module, 
+# 						include_vision_backbone: bool = True,
+# 						include_text_encoder: bool = True,
+# 						include_fusion: bool = True,
+# 						include_detection_head: bool = True,
+# 						vision_layers_from_end: int = 6) -> Dict[str, List[str]]:
+# 	"""
+# 	Extract target layers for LoRA fine-tuning from Grounding DINO model.
+	
+# 	Args:
+# 		model: The Grounding DINO PyTorch model
+# 		include_vision_backbone: Whether to include vision backbone layers
+# 		include_text_encoder: Whether to include text encoder layers
+# 		include_fusion: Whether to include cross-modal fusion layers
+# 		include_detection_head: Whether to include detection head layers
+# 		vision_layers_from_end: Number of vision backbone layers to target from the end
+	
+# 	Returns:
+# 		Dictionary with categorized layer names
+# 	"""
+# 	target_layers = {
+# 		'vision_backbone': [],
+# 		'text_encoder': [],
+# 		'fusion_layers': [],
+# 		'detection_head': [],
+# 		'all_targets': []
+# 	}
+
+# 	# Common attention and linear layer patterns
+# 	attention_patterns = [
+# 		r'.*self_attn\.q_proj$',
+# 		r'.*self_attn\.k_proj$', 
+# 		r'.*self_attn\.v_proj$',
+# 		r'.*self_attn\.out_proj$',
+# 		r'.*cross_attn\.q_proj$',
+# 		r'.*cross_attn\.k_proj$',
+# 		r'.*cross_attn\.v_proj$',
+# 		r'.*cross_attn\.out_proj$',
+# 		r'.*multihead_attn\.q_proj$',
+# 		r'.*multihead_attn\.k_proj$',
+# 		r'.*multihead_attn\.v_proj$',
+# 		r'.*multihead_attn\.out_proj$'
+# 	]
+
+# 	linear_patterns = [
+# 		r'.*linear1$',
+# 		r'.*linear2$',
+# 		r'.*fc1$',
+# 		r'.*fc2$',
+# 		r'.*ffn\.layers\.\d+$'
+# 	]
+
+# 	all_patterns = attention_patterns + linear_patterns
+
+# 	for name, module in model.named_modules():
+# 		if not isinstance(module, (nn.Linear, nn.Conv2d)):
+# 			continue
+
+# 		# Check if this layer matches our target patterns
+# 		matches_pattern = any(re.match(pattern, name) for pattern in all_patterns)
+# 		if not matches_pattern:
+# 			continue
+
+# 		# Categorize the layer
+# 		if include_vision_backbone and is_vision_backbone_layer(name, vision_layers_from_end):
+# 			target_layers['vision_backbone'].append(name)
+# 			target_layers['all_targets'].append(name)
+			
+# 		elif include_text_encoder and is_text_encoder_layer(name):
+# 			target_layers['text_encoder'].append(name)
+# 			target_layers['all_targets'].append(name)
+			
+# 		elif include_fusion and is_fusion_layer(name):
+# 			target_layers['fusion_layers'].append(name)
+# 			target_layers['all_targets'].append(name)
+			
+# 		elif include_detection_head and is_detection_head_layer(name):
+# 			target_layers['detection_head'].append(name)
+# 			target_layers['all_targets'].append(name)
+	
+# 	return target_layers
+
+# def is_vision_backbone_layer(layer_name: str, layers_from_end: int = 6) -> bool:
+# 	"""Check if layer belongs to vision backbone (targeting last N layers)"""
+# 	vision_patterns = [
+# 		r'.*backbone.*',
+# 		r'.*visual.*encoder.*',
+# 		r'.*vision.*transformer.*',
+# 		r'.*patch_embed.*',
+# 		r'.*blocks\.\d+.*',  # Vision transformer blocks
+# 		r'.*layers\.\d+.*'   # Generic transformer layers in vision
+# 	]
+	
+# 	# Check if it's a vision layer
+# 	is_vision = any(re.search(pattern, layer_name, re.IGNORECASE) for pattern in vision_patterns)
+	
+# 	if not is_vision:
+# 		return False
+	
+# 	# Extract layer number to target only the last N layers
+# 	layer_num_match = re.search(r'(?:blocks|layers)\.(\d+)', layer_name)
+# 	if layer_num_match:
+# 		layer_num = int(layer_num_match.group(1))
+# 		# This is a heuristic - you might need to adjust based on your model's architecture
+# 		# Assuming most vision transformers have 12-24 layers
+# 		return layer_num >= (24 - layers_from_end)  # Adjust this threshold as needed
+	
+# 	return is_vision
+
+# def is_text_encoder_layer(layer_name: str) -> bool:
+# 	"""Check if layer belongs to text encoder"""
+# 	text_patterns = [
+# 		r'.*text.*encoder.*',
+# 		r'.*bert.*',
+# 		r'.*language.*model.*',
+# 		r'.*transformer.*text.*',
+# 		r'.*embeddings.*',
+# 		r'.*encoder\.layer\.\d+.*'
+# 	]
+	
+# 	return any(re.search(pattern, layer_name, re.IGNORECASE) for pattern in text_patterns)
+
+# def is_fusion_layer(layer_name: str) -> bool:
+# 	"""Check if layer belongs to cross-modal fusion"""
+# 	fusion_patterns = [
+# 		r'.*cross.*attn.*',
+# 		r'.*fusion.*',
+# 		r'.*multimodal.*',
+# 		r'.*cross.*modal.*',
+# 		r'.*decoder.*cross.*',
+# 		r'.*transformer.*decoder.*'
+# 	]
+	
+# 	return any(re.search(pattern, layer_name, re.IGNORECASE) for pattern in fusion_patterns)
+
+# def is_detection_head_layer(layer_name: str) -> bool:
+# 	"""Check if layer belongs to detection head"""
+# 	head_patterns = [
+# 		r'.*class.*head.*',
+# 		r'.*bbox.*head.*',
+# 		r'.*detection.*head.*',
+# 		r'.*classifier.*',
+# 		r'.*cls.*head.*',
+# 		r'.*reg.*head.*'
+# 	]
+	
+# 	return any(re.search(pattern, layer_name, re.IGNORECASE) for pattern in head_patterns)
+
+# def print_layer_summary(target_layers: Dict[str, List[str]]):
+# 	"""Print a summary of targeted layers"""
+# 	print("=== LoRA Target Layers Summary ===")
+# 	for category, layers in target_layers.items():
+# 		if category == 'all_targets':
+# 			continue
+# 		print(f"\n{category.upper()} ({len(layers)} layers):")
+# 		for layer in layers[:5]:  # Show first 5 layers
+# 			print(f"  - {layer}")
+# 		if len(layers) > 5:
+# 			print(f"  ... and {len(layers) - 5} more")
+	
+# 	print(f"\nTotal target layers: {len(target_layers['all_targets'])}")
+
+
+
+
+
+
+
+
+
+
 def main():
+	# model = AutoModelForZeroShotObjectDetection.from_pretrained(DEFAULT_DINO_MODEL)
+	# target_layers = get_lora_target_layers(model)
+	# print_layer_summary(target_layers)
+	# return
+
 	try:
 		train()
 	except Exception as e:
