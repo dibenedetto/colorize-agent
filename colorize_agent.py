@@ -20,7 +20,7 @@ class ColorizeAgent:
 	DEFAULT_SEGMENTATION_MODEL       = SemanticSegmentation .DEFAULT_MODEL
 	DEFAULT_SEGMENTATION_REFINEMENT  = SemanticSegmentation .DEFAULT_REFINEMENT
 	DEFAULT_ANNOTATION               = True
-	DEFAULT_3D_OBJECT                = Model3DGeneration    .DEFAULT_3D_OBJECT
+	DEFAULT_GENERATE_3D              = "model3d.glb"
 
 
 	def __init__(self):
@@ -42,6 +42,9 @@ class ColorizeAgent:
 					parts = json.loads(json_str)
 				except json.JSONDecodeError:
 					parts = None
+		if parts is not None:
+			for i, part in enumerate(parts):
+				parts[i] = [p.strip() for p in part]
 		return parts
 
 
@@ -171,16 +174,16 @@ class ColorizeAgent:
 				annotated_image = np.array(image)
 
 		if True:
-			model_3d = ColorizeAgent.DEFAULT_3D_OBJECT
+			model_3d = None
 
 			if generate_3d is None:
-				generate_3d = ColorizeAgent.DEFAULT_3D_OBJECT
+				generate_3d = ColorizeAgent.DEFAULT_GENERATE_3D
 
 			if generate_3d and self._model3d is not None and self._model3d.is_valid:
-				model_3d = self._model3d(image)
+				model_3d = self._model3d(image, generate_3d)
 
 		return annotated_image, model_3d, parts, detection_results
 
 
-	def __call__(self, image, text=None, detection_threshold=None, polygon_refinement=None, annotate=None):
-		return self.run(image, text, detection_threshold, polygon_refinement, annotate)
+	def __call__(self, image, text=None, detection_box_threshold=None, detection_text_threshold=None, segmentation_refinement=None, annotate=None, generate_3d=None):
+		return self.run(image, text, detection_box_threshold, detection_text_threshold, segmentation_refinement, annotate, generate_3d)

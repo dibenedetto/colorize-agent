@@ -1,12 +1,12 @@
 import os
 import numpy as np
+import cv2
 import gradio as gr
 from dotenv import load_dotenv
 
 from agents import WebSearchTool, set_default_openai_key
 
 from colorize_agent import ColorizeAgent
-from utils import make_model_3d
 
 
 load_dotenv()
@@ -29,9 +29,18 @@ SEGMENTATION_REFINEMENT  = ColorizeAgent.DEFAULT_SEGMENTATION_REFINEMENT
 LLM_INSTRUCTIONS = """
 You are a visual grounding assistant. Your job is to:
 - Identify objects or object parts associated to material appearance (e.g., color)
-- If the object or object part uses uncommon, technical, mythological, or historical terms, search Wikipedia (if needed) to understand what the terms represent
+- If the object or object part uses uncommon, technical, mythological, or historical terms, search the web (if needed) to understand what the terms represent
 - Then create a list of triplets containing ["object", "appearance", "simplified"]  where "object" is the object, "appearance" is material appearance, and "simplified" is the simple and recognizable terms suitable for an object detector like Grounding DINO (e.g., [['Oceanus', 'metallic red', 'bearded sea god'], ['Erotes', 'crimson-red and ochre-red', 'winged love god'], ...])
 - Output the list only in Python syntax, without any additional text or explanations
+"""
+
+LLM_INSTRUCTIONS = """
+You are a visual grounding assistant.
+Your job is to interpret the question and create a table with three columns representing:
+1) The part/object associated with appearance information.
+2) Its appearance information.
+3) If the part/object uses uncommon, technical, mythological, or historical terms, search the web (if needed) to understand what the terms represent and use a simplified version such that i can pass it to a grounding image detector like GeroundingDino; otherwise leave it as it is.
+4) Represent the table as a Python list like [["part/object", "appearance", "simplified"], ...], without any additional text or explanations.
 """
 
 LLM_OPTIONS = {
@@ -115,46 +124,56 @@ def create_model_options_grid():
 			label="Segmentation Model"
 		)
 
-		segmentation_refine = gr.Checkbox(
+		segmentation_refinement = gr.Checkbox(
 			value=SEGMENTATION_REFINEMENT,
 			label="Refinement",
 		)
 
-	return llm_choice, llm_instructions, llm_temperature, llm_max_out_tokens, detection_choice, detection_box_threshold, detection_text_threshold, segmentation_choice, segmentation_refine
+	return llm_choice, llm_instructions, llm_temperature, llm_max_out_tokens, detection_choice, detection_box_threshold, detection_text_threshold, segmentation_choice, segmentation_refinement
 
 
-async def gradio_interface(image, text, search_web, llm_choice, llm_instructions, llm_temperature, llm_max_out_tokens, detection_choice, threshold_box, threshold_text, segmentation_choice, segmentation_refine):
+async def gradio_interface(image, text, search_web, llm_choice, llm_instructions, llm_temperature, llm_max_out_tokens, detection_choice, detection_box_threshold, detection_text_threshold, segmentation_choice, segmentation_refinement):
 	try:
-		llm_model          = LLM_OPTIONS.get(llm_choice)
-		llm_temperature    = float(llm_temperature)
-		llm_max_out_tokens = int(llm_max_out_tokens)
-		llm_kwargs         = dict(tools=[WebSearchTool(search_context_size="high"),])
+		llm_model                = LLM_OPTIONS.get(llm_choice)
+		llm_temperature          = float(llm_temperature)
+		llm_max_out_tokens       = int(llm_max_out_tokens)
+		llm_kwargs               = dict(tools=[WebSearchTool(search_context_size="high"),])
 
-		detection_model    = DETECTION_OPTIONS.get(detection_choice)
-		threshold_box      = float(threshold_box)
-		threshold_text     = float(threshold_text)
+		detection_model          = DETECTION_OPTIONS.get(detection_choice)
+		detection_box_threshold  = float(detection_box_threshold)
+		detection_text_threshold = float(detection_text_threshold)
+		detection_kwargs         = None
 
-		segmentation_model = SEGMENTATION_OPTIONS.get(segmentation_choice)
+		segmentation_model       = SEGMENTATION_OPTIONS.get(segmentation_choice)
+		segmentation_kwargs      = None
+
+		model3d_model            = None
+		model3d_api_key          = None
+		model3d_kwargs           = None
 
 		g_agent.setup(
 			llm_instructions=llm_instructions, llm_model=llm_model[0], llm_api_key=llm_model[1], llm_temperature=llm_temperature, llm_max_out_tokens=llm_max_out_tokens, llm_kwargs=llm_kwargs,
-			detection_model=detection_model[0], detection_api_key=detection_model[1], detection_kwargs=None,
-			segmentation_model=segmentation_model[0], segmentation_api_key=segmentation_model[1], segmentation_kwargs=None,
+			detection_model=detection_model[0], detection_api_key=detection_model[1], detection_kwargs=detection_kwargs,
+			segmentation_model=segmentation_model[0], segmentation_api_key=segmentation_model[1], segmentation_kwargs=segmentation_kwargs,
+			model3d_model=model3d_model, model3d_api_key=model3d_api_key, model3d_kwargs=model3d_kwargs,
 		)
 
-		polygon_refinement = segmentation_refine
-		annotate           = True
+		annotate    = True
+		generate_3d = "model3d.glb"
 
-		annotated_image, model_3d, parts, detection_results = await g_agent(image=image, text=text, detection_threshold=threshold_box, polygon_refinement=polygon_refinement, annotate=annotate)
+		annotated_image, model_3d, parts, detection_results = await g_agent(image=image, text=text, detection_box_threshold=detection_box_threshold, detection_text_threshold=detection_text_threshold, segmentation_refinement=segmentation_refinement, annotate=annotate, generate_3d=generate_3d)
 
 		for res in detection_results:
+			res.label = res.label.strip().lower()
 			if res.label.endswith("."):
 				res.label = res.label[:-1]
 		detection_results = sorted(detection_results, key=lambda x: x.label)
 
-		labels   = [res.label for res in detection_results]
-		status   = f"Success: operating on {g_agent.llm_agent.model_name}, {g_agent.detection.model_name}, {g_agent.segmentation.model_name}."
+		image_np = np.array(image)
+
+		labels   = [(cv2.bitwise_and(image_np, image_np, mask=res.mask), res.label) for res in detection_results]
 		sources  = parts
+		status   = f"Success: operating on {g_agent.llm_agent.model_name}, {g_agent.detection.model_name}, {g_agent.segmentation.model_name}."
 
 		return annotated_image, model_3d, parts, labels, sources, status
 
@@ -168,9 +187,9 @@ async def gradio_interface(image, text, search_web, llm_choice, llm_instructions
 
 def search_image(image):
 	if not image:
-		return "No image provided for web search."
+		return None
 
-	return "INVALID"
+	return None
 
 
 def main():
@@ -222,8 +241,9 @@ def main():
 						gr.Markdown("### Output")
 						output_image   = gr.Image(type="pil", label="Annotated Image")
 						output_3d      = gr.Model3D(label="3D Object")
-						output_parts   = gr.Dataframe(label="Parts", headers=['Description', 'Appearance', 'Simplified'])
-						output_labels  = gr.Dataframe(label="Labels", headers=['Labels'])
+						output_parts   = gr.Dataframe(label="Parts", headers=["Description", "Appearance", "Simplified"])
+						# output_labels  = gr.Dataframe(label="Labels", headers=["Label", "Mask"])
+						output_labels  = gr.Gallery(label="Generated images", show_label=False, elem_id="gallery", columns=[3], rows=[1], object_fit="contain", height="auto")
 						output_sources = gr.Textbox(label="Sources", interactive=False)
 						output_status  = gr.Textbox(label="Status", interactive=False)
 

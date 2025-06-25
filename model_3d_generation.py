@@ -1,12 +1,11 @@
+import numpy as np
 import torch
-from transformers import pipeline
-
-from utils import DetectionResult
+from diffusers import DiffusionPipeline
 
 
 class Model3DGeneration:
 
-	DEFAULT_MODEL     = "IDEA-Research/grounding-dino-tiny"
+	DEFAULT_MODEL     = "dylanebert/LGM-full"
 	DEFAULT_3D_OBJECT = "default_model.obj"
 
 
@@ -36,13 +35,19 @@ class Model3DGeneration:
 
 		self.cleanup()
 
-		device   = "cuda" if torch.cuda.is_available() else "cpu"
-		detector = pipeline(model=model, task="zero-shot-object-detection", device=device)
+		device    = "cuda" if torch.cuda.is_available() else "cpu"
+		# generator = DiffusionPipeline.from_pretrained(
+		# 	model,
+		# 	custom_pipeline   = "dylanebert/LGM-full",
+		# 	torch_dtype       = torch.float16,
+		# 	trust_remote_code = True,
+		# ).to(device)
+		generator = None
 
-		self._model    = model
-		self._api_key  = api_key
-		self._kwargs   = kwargs
-		self._detector = detector
+		self._model     = model
+		self._api_key   = api_key
+		self._kwargs    = kwargs
+		self._generator = generator
 
 		return True
 
@@ -54,23 +59,16 @@ class Model3DGeneration:
 		self._generator = None
 
 
-	def run(self, image):
+	def run(self, image, path):
 		if not self.is_valid:
 			raise ValueError("Model3DGeneration is not valid. Please call setup() first.")
 
-		# labels = [label if label.endswith(".") else label + "." for label in labels]
-		# if box_threshold is None:
-		# 	box_threshold = GroundingDetection.DEFAULT_BOX_THRESHOLD
-		# if text_threshold is None:
-		# 	text_threshold = GroundingDetection.DEFAULT_TEXT_THRESHOLD
+		image_np = np.array(image, dtype=np.float32) / 255.0
+		result   = self._generator("", image_np)
+		self._generator.save_glb(result, path)
 
-		# results = self._detector(image, candidate_labels=labels, threshold=box_threshold)
-		# results = [DetectionResult.from_dict(result) for result in results]
-
-		# return results
-
-		return Model3DGeneration.DEFAULT_3D_OBJECT
+		return path
 
 
-	def __call__(self, image):
-		return self.run(image)
+	def __call__(self, image, path):
+		return self.run(image, path)
