@@ -8,6 +8,7 @@ import re
 import shutil
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 import torch.optim as optim
 
 
@@ -16,6 +17,7 @@ from PIL import Image
 from scipy.optimize import linear_sum_assignment
 from torch.nn.utils import clip_grad_norm_
 from torch.utils.data import DataLoader, Dataset
+from torchvision.ops import generalized_box_iou
 from transformers import AutoProcessor, AutoModel, AutoModelForZeroShotObjectDetection
 from typing import List, Dict, Tuple, Optional, Union
 
@@ -115,9 +117,10 @@ def build_label_mapping_from_files(*args):
 class GroundingDINODataset(Dataset):
 	"""Dataset class for few-shot GroundingDINO fine-tuning with proper box handling"""
 	
-	def __init__(self, data_path: str, processor, max_token_length: int = 256, max_image_size: int = 800):
+	def __init__(self, data_path: str, label_to_id: Dict[str, int], processor, max_token_length: int = 256, max_image_size: int = 800):
 		self.base_path        = os.path.dirname(os.path.abspath(data_path))
 		self.data_path        = data_path
+		self.label_to_id      = label_to_id
 		self.processor        = processor
 		self.max_token_length = max_token_length
 		self.max_image_size   = max_image_size
@@ -139,11 +142,11 @@ class GroundingDINODataset(Dataset):
 	def __getitem__(self, idx):
 		item = self.data[idx]
 
-		image_path = f"{self.base_path}/{item['filename']}"
-		image      = Image.open(image_path).convert("RGB")
-		image_size = image.size  # (w, h)
+		image_path    = f"{self.base_path}/{item['filename']}"
+		image         = Image.open(image_path).convert("RGB")
+		width, height = image.size
 
-		# image_tensor = self.transform(image)
+		# image = self.transform(image)
 
 		inputs = self.processor(
 			images         = image,
@@ -159,20 +162,22 @@ class GroundingDINODataset(Dataset):
 			x, y, w, h = box
 			cx = x + w / 2
 			cy = y + h / 2
-			cx_norm = cx / image_size[1]
-			cy_norm = cy / image_size[0]
-			w_norm  = w  / image_size[1]
-			h_norm  = h  / image_size[0]
+			cx_norm = cx / width
+			cy_norm = cy / height
+			w_norm  = w  / width
+			h_norm  = h  / height
 			boxes.append([cx_norm, cy_norm, w_norm, h_norm])
+
+		labels = [self.label_to_id[label] for label in item["labels"]]
 
 		return {
 			"pixel_values"   : inputs["pixel_values"  ].squeeze(0),
 			"input_ids"      : inputs["input_ids"     ].squeeze(0),
 			"attention_mask" : inputs["attention_mask"].squeeze(0),
-			"image_size"     : image_size,
+			"image_size"     : (width, height),
 			"text"           : item["text"],
 			"boxes"          : boxes,
-			"labels"         : item["labels"]
+			"labels"         : labels
 		}
 
 
@@ -379,224 +384,742 @@ class LoRAManager:
 		return ranks
 
 
-class DetectionLoss(nn.Module):
-	"""Proper detection loss for GroundingDINO"""
+# class DetectionLoss(nn.Module):
+# 	"""Proper detection loss for GroundingDINO"""
 
-	def __init__(self, label_to_id: Dict[str, int] = {}, cost_class: float = 1.0, cost_bbox: float = 5.0, cost_giou: float = 2.0):
+# 	def __init__(self, num_classes: int, cost_class: float = 1.0, cost_bbox: float = 5.0, cost_giou: float = 2.0):
+# 		super().__init__()
+# 		self.num_classes = num_classes
+# 		self.cost_class = cost_class
+# 		self.cost_bbox = cost_bbox
+# 		self.cost_giou = cost_giou
+
+# 		self.focal_loss = nn.BCEWithLogitsLoss(reduction='none')
+# 		self.l1_loss = nn.L1Loss(reduction='none')
+
+
+# 	def generalized_box_iou(self, boxes1, boxes2):
+# 		"""Compute generalized IoU between two sets of boxes"""
+# 		# Ensure boxes are in xyxy format
+# 		if boxes1.shape[-1] == 4 and boxes2.shape[-1] == 4:
+# 			# Calculate intersection
+# 			lt = torch.max(boxes1[:, None, :2], boxes2[:, :2])  # [N, M, 2]
+# 			rb = torch.min(boxes1[:, None, 2:], boxes2[:, 2:])  # [N, M, 2]
+
+# 			wh = (rb - lt).clamp(min=0)  # [N, M, 2]
+# 			inter = wh[:, :, 0] * wh[:, :, 1]  # [N, M]
+
+# 			# Calculate areas
+# 			area1 = (boxes1[:, 2] - boxes1[:, 0]) * (boxes1[:, 3] - boxes1[:, 1])
+# 			area2 = (boxes2[:, 2] - boxes2[:, 0]) * (boxes2[:, 3] - boxes2[:, 1])
+# 			union = area1[:, None] + area2 - inter
+
+# 			# IoU
+# 			iou = inter / (union + 1e-6)
+
+# 			# Generalized IoU
+# 			lti = torch.min(boxes1[:, None, :2], boxes2[:, :2])
+# 			rbi = torch.max(boxes1[:, None, 2:], boxes2[:, 2:])
+# 			whi = (rbi - lti).clamp(min=0)
+# 			areai = whi[:, :, 0] * whi[:, :, 1]
+
+# 			giou = iou - (areai - union) / (areai + 1e-6)
+# 			return giou, iou
+# 		else:
+# 			# Return dummy values if boxes are malformed
+# 			return torch.zeros((boxes1.shape[0], boxes2.shape[0]), device=boxes1.device), \
+# 				torch.zeros((boxes1.shape[0], boxes2.shape[0]), device=boxes1.device)
+
+# 	def hungarian_matching(self, pred_boxes, pred_logits, target_boxes, target_labels):
+# 		"""Perform Hungarian matching between predictions and targets"""
+# 		batch_size = pred_boxes.shape[0]
+# 		indices = []
+
+# 		for b in range(batch_size):
+# 			# Get predictions and targets for this batch
+# 			pred_box = pred_boxes[b]  # [num_queries, 4]
+# 			pred_logit = pred_logits[b]  # [num_queries, num_classes]
+# 			target_box = target_boxes[b]  # [num_targets, 4]
+# 			target_label = target_labels[b]  # [num_targets]
+
+# 			if len(target_box) == 0:
+# 				indices.append((torch.empty(0, dtype=torch.long, device=pred_box.device),
+# 							torch.empty(0, dtype=torch.long, device=pred_box.device)))
+# 				continue
+
+# 			# Compute cost matrix
+# 			# Classification cost
+# 			alpha = 0.25
+# 			gamma = 2.0
+# 			neg_cost_class = (1 - alpha) * (pred_logit ** gamma) * (-(1 - pred_logit + 1e-8).log())
+# 			pos_cost_class = alpha * ((1 - pred_logit) ** gamma) * (-(pred_logit + 1e-8).log())
+
+# 			# Create cost class matrix
+# 			cost_class = torch.zeros(pred_logit.shape[0], len(target_label), device=pred_logit.device)
+# 			for i, label_idx in enumerate(target_label):
+# 				if label_idx < pred_logit.shape[1]:
+# 					cost_class[:, i] = pos_cost_class[:, label_idx] - neg_cost_class[:, label_idx]
+
+# 			# Box costs
+# 			cost_bbox = torch.cdist(pred_box, target_box, p=1)  # L1 distance
+
+# 			# GIoU cost
+# 			try:
+# 				giou, _ = self.generalized_box_iou(pred_box, target_box)
+# 				cost_giou = -giou
+# 			except:
+# 				cost_giou = torch.ones_like(cost_bbox)
+
+# 			# Final cost matrix
+# 			C = self.cost_bbox * cost_bbox + self.cost_class * cost_class + self.cost_giou * cost_giou
+
+# 			# Hungarian matching
+# 			try:
+# 				pred_idx, target_idx = linear_sum_assignment(C.cpu().numpy())
+# 				indices.append((torch.tensor(pred_idx, dtype=torch.long, device=pred_box.device),
+# 							torch.tensor(target_idx, dtype=torch.long, device=pred_box.device)))
+# 			except:
+# 				# Fallback: match first N predictions to first N targets
+# 				num_matches = min(len(pred_box), len(target_box))
+# 				indices.append((torch.arange(num_matches, device=pred_box.device),
+# 							torch.arange(num_matches, device=pred_box.device)))
+
+# 		return indices
+
+# 	def forward(self, outputs, targets):
+# 		"""Compute detection loss"""
+# 		# Extract predictions - adapt based on actual GroundingDINO output structure
+# 		if hasattr(outputs, "logits") and hasattr(outputs, "pred_boxes"):
+# 			pred_logits = outputs.logits.sigmoid()  # [batch_size, num_queries, num_classes]
+# 			pred_boxes = outputs.pred_boxes  # [batch_size, num_queries, 4]
+# 		else:
+# 			# Fallback: create dummy predictions from last hidden state
+# 			hidden_states = outputs.last_hidden_state
+# 			batch_size, seq_len, hidden_dim = hidden_states.shape
+
+# 			# Create dummy predictions
+# 			pred_logits = torch.randn(batch_size, min(100, seq_len), self.num_classes, 
+# 									device=hidden_states.device, requires_grad=True)
+# 			pred_boxes = torch.sigmoid(torch.randn(batch_size, min(100, seq_len), 4, 
+# 												device=hidden_states.device, requires_grad=True))
+
+# 		# Prepare targets
+# 		target_boxes = []
+# 		target_labels = []
+
+# 		for batch_item in targets:
+# 			boxes = batch_item["boxes"]  # Already normalized
+# 			labels = batch_item["labels"]
+
+# 			target_boxes.append(boxes)
+# 			target_labels.append(torch.tensor(labels, device=pred_boxes.device))
+
+# 		# Pad targets to same length
+# 		max_targets = max(len(tb) for tb in target_boxes) if target_boxes else 1
+
+# 		padded_target_boxes = []
+# 		padded_target_labels = []
+
+# 		for boxes, labels in zip(target_boxes, target_labels):
+# 			if len(boxes) == 0:
+# 				# Add dummy target if no boxes
+# 				padded_boxes = torch.zeros(1, 4, device=pred_boxes.device)
+# 				padded_labels = torch.zeros(1, dtype=torch.long, device=pred_boxes.device)
+# 			else:
+# 				# Pad to max_targets
+# 				pad_size = max_targets - len(boxes)
+# 				if pad_size > 0:
+# 					padding_boxes = torch.zeros(pad_size, 4, device=pred_boxes.device)
+# 					padding_labels = torch.zeros(pad_size, dtype=torch.long, device=pred_boxes.device)
+# 					padded_boxes = torch.cat([boxes, padding_boxes])
+# 					padded_labels = torch.cat([labels, padding_labels])
+# 				else:
+# 					padded_boxes = boxes[:max_targets]
+# 					padded_labels = labels[:max_targets]
+
+# 			padded_target_boxes.append(padded_boxes)
+# 			padded_target_labels.append(padded_labels)
+
+# 		# Perform matching
+# 		indices = self.hungarian_matching(pred_boxes, pred_logits, padded_target_boxes, padded_target_labels)
+
+# 		# Compute losses
+# 		total_loss = 0
+# 		num_boxes = sum(len(t["boxes"]) for t in targets)
+# 		num_boxes = max(num_boxes, 1)  # Avoid division by zero
+
+# 		# Classification loss
+# 		class_loss = 0
+# 		for i, (pred_idx, target_idx) in enumerate(indices):
+# 			if len(pred_idx) > 0:
+# 				selected_pred_logits = pred_logits[i][pred_idx]
+# 				selected_target_labels = padded_target_labels[i][target_idx]
+
+# 				# Focal loss
+# 				target_classes = torch.zeros_like(selected_pred_logits)
+# 				target_classes[range(len(selected_target_labels)), selected_target_labels] = 1
+
+# 				focal_loss = self.focal_loss(selected_pred_logits, target_classes)
+# 				class_loss += focal_loss.mean()
+
+# 		class_loss = class_loss / len(indices)
+
+# 		# Box regression loss
+# 		bbox_loss = 0
+# 		giou_loss = 0
+
+# 		for i, (pred_idx, target_idx) in enumerate(indices):
+# 			if len(pred_idx) > 0:
+# 				selected_pred_boxes = pred_boxes[i][pred_idx]
+# 				selected_target_boxes = padded_target_boxes[i][target_idx]
+
+# 				# L1 loss
+# 				bbox_loss += self.l1_loss(selected_pred_boxes, selected_target_boxes).mean()
+
+# 				# GIoU loss
+# 				try:
+# 					giou, _ = self.generalized_box_iou(selected_pred_boxes, selected_target_boxes)
+# 					giou_loss += (1 - torch.diag(giou)).mean()
+# 				except:
+# 					giou_loss += torch.tensor(0.0, device=pred_boxes.device, requires_grad=True)
+
+# 		bbox_loss = bbox_loss / len(indices)
+# 		giou_loss = giou_loss / len(indices)
+
+# 		# Combine losses
+# 		total_loss = self.cost_class * class_loss + self.cost_bbox * bbox_loss + self.cost_giou * giou_loss
+
+# 		return {
+# 			"total_loss": total_loss,
+# 			"class_loss": class_loss,
+# 			"bbox_loss": bbox_loss,
+# 			"giou_loss": giou_loss
+# 		}
+
+
+# #### OTHER
+
+# def check_and_fix_logits(logits, name="logits"):
+# 	"""
+# 	Check for and fix problematic values in logits.
+	
+# 	Args:
+# 		logits: tensor to check
+# 		name: name for debugging output
+	
+# 	Returns:
+# 		Fixed logits tensor
+# 	"""
+# 	# Check for problematic values
+# 	has_inf = torch.isinf(logits).any()
+# 	has_nan = torch.isnan(logits).any()
+	
+# 	if has_inf or has_nan:
+# 		print(f"WARNING: Found problematic values in {name}:")
+# 		if has_inf:
+# 			n_inf = torch.isinf(logits).sum().item()
+# 			print(f"  - {n_inf} inf values")
+# 		if has_nan:
+# 			n_nan = torch.isnan(logits).sum().item()
+# 			print(f"  - {n_nan} NaN values")
+		
+# 		# Replace inf and nan values
+# 		logits = torch.where(torch.isinf(logits), torch.sign(logits) * 50.0, logits)
+# 		logits = torch.where(torch.isnan(logits), torch.zeros_like(logits), logits)
+		
+# 		print(f"  Fixed problematic values in {name}")
+	
+# 	# Clamp to reasonable range
+# 	logits = torch.clamp(logits, min=-50, max=50)
+# 	return logits
+
+
+# class HungarianMatcher(nn.Module):
+# 	"""
+# 	Hungarian matcher for DETR-style models like GroundingDINO.
+# 	Computes optimal assignment between predictions and ground truth.
+# 	"""
+	
+# 	def __init__(self, cost_class: float = 1.0, cost_bbox: float = 5.0, cost_giou: float = 2.0):
+# 		super().__init__()
+# 		self.cost_class = cost_class
+# 		self.cost_bbox = cost_bbox
+# 		self.cost_giou = cost_giou
+		
+# 	@torch.no_grad()
+# 	def forward(self, outputs, targets):
+# 		"""
+# 		Performs Hungarian matching between predictions and targets.
+		
+# 		Args:
+# 			outputs: dict with 'pred_logits' [B, N, C] and 'pred_boxes' [B, N, 4]
+# 			targets: list of dicts, each with 'labels' and 'boxes' tensors
+			
+# 		Returns:
+# 			List of tuples (pred_indices, target_indices) for each batch element
+# 		"""
+# 		batch_size, num_queries = outputs["logits"].shape[:2]
+		
+# 		# Flatten predictions to compute costs
+# 		pred_logits = outputs["logits"].flatten(0, 1)  # [B*N, C]
+# 		pred_boxes = outputs["pred_boxes"].flatten(0, 1)    # [B*N, 4]
+		
+# 		# Clamp logits only for stable cost computation in Hungarian matching
+# 		# (sigmoid in loss_labels handles -inf naturally, but cost matrix needs stability)
+# 		pred_logits = check_and_fix_logits(pred_logits, "pred_logits_matcher")
+		
+# 		# Convert logits to probabilities
+# 		pred_probs = pred_logits.sigmoid()
+		
+# 		indices = []
+		
+# 		for i, target in enumerate(targets):
+# 			target_labels = target["labels"]  # [num_targets]
+# 			target_boxes = target["boxes"]    # [num_targets, 4]
+			
+# 			if len(target_labels) == 0:
+# 				# No targets in this image
+# 				indices.append((torch.empty(0, dtype=torch.int64), torch.empty(0, dtype=torch.int64)))
+# 				continue
+			
+# 			# Classification cost - use negative log probability for assigned class
+# 			cost_class = -pred_probs[i * num_queries:(i + 1) * num_queries, target_labels]
+			
+# 			# Bbox L1 cost
+# 			cost_bbox = torch.cdist(pred_boxes[i * num_queries:(i + 1) * num_queries], 
+# 								target_boxes, p=1)
+			
+# 			# Bbox GIoU cost
+# 			cost_giou = -self.generalized_box_iou(
+# 				self.cxcywh_to_xyxy(pred_boxes[i * num_queries:(i + 1) * num_queries]),
+# 				self.cxcywh_to_xyxy(target_boxes)
+# 			)
+			
+# 			# Final cost matrix
+# 			cost_matrix = (
+# 				self.cost_class * cost_class + 
+# 				self.cost_bbox * cost_bbox + 
+# 				self.cost_giou * cost_giou
+# 			)
+			
+# 			# Hungarian matching
+# 			pred_indices, target_indices = linear_sum_assignment(cost_matrix.cpu().numpy())
+			
+# 			indices.append((
+# 				torch.tensor(pred_indices, dtype=torch.int64),
+# 				torch.tensor(target_indices, dtype=torch.int64)
+# 			))
+		
+# 		return indices
+	
+# 	def cxcywh_to_xyxy(self, boxes):
+# 		"""Convert boxes from cxcywh to xyxy format."""
+# 		cx, cy, w, h = boxes.unbind(-1)
+# 		x1 = cx - 0.5 * w
+# 		y1 = cy - 0.5 * h
+# 		x2 = cx + 0.5 * w
+# 		y2 = cy + 0.5 * h
+# 		return torch.stack([x1, y1, x2, y2], dim=-1)
+	
+# 	def generalized_box_iou(self, boxes1, boxes2):
+# 		"""Compute generalized IoU between two sets of boxes."""
+# 		# Ensure boxes are valid
+# 		assert (boxes1[:, 2:] >= boxes1[:, :2]).all()
+# 		assert (boxes2[:, 2:] >= boxes2[:, :2]).all()
+		
+# 		# Intersection
+# 		lt = torch.max(boxes1[:, None, :2], boxes2[:, :2])
+# 		rb = torch.min(boxes1[:, None, 2:], boxes2[:, 2:])
+# 		wh = (rb - lt).clamp(min=0)
+# 		inter = wh[:, :, 0] * wh[:, :, 1]
+		
+# 		# Union
+# 		area1 = (boxes1[:, 2] - boxes1[:, 0]) * (boxes1[:, 3] - boxes1[:, 1])
+# 		area2 = (boxes2[:, 2] - boxes2[:, 0]) * (boxes2[:, 3] - boxes2[:, 1])
+# 		union = area1[:, None] + area2 - inter
+		
+# 		# IoU
+# 		iou = inter / union
+		
+# 		# Convex hull
+# 		lt_hull = torch.min(boxes1[:, None, :2], boxes2[:, :2])
+# 		rb_hull = torch.max(boxes1[:, None, 2:], boxes2[:, 2:])
+# 		wh_hull = (rb_hull - lt_hull).clamp(min=0)
+# 		convex_area = wh_hull[:, :, 0] * wh_hull[:, :, 1]
+		
+# 		# GIoU
+# 		giou = iou - (convex_area - union) / convex_area
+# 		return giou
+
+
+# class GroundingDINOLoss(nn.Module):
+# 	"""
+# 	Loss function for GroundingDINO with Hungarian matching.
+# 	"""
+	
+# 	def __init__(
+# 		self,
+# 		matcher: HungarianMatcher,
+# 		num_classes: int,
+# 		alpha: float = 0.25,
+# 		gamma: float = 2.0,
+# 		bbox_loss_coef: float = 5.0,
+# 		giou_loss_coef: float = 2.0,
+# 		focal_loss_coef: float = 1.0,
+# 		eos_coef: float = 0.1  # Weight for "no object" class
+# 	):
+# 		super().__init__()
+# 		self.matcher = matcher
+# 		self.num_classes = num_classes
+# 		self.alpha = alpha
+# 		self.gamma = gamma
+# 		self.bbox_loss_coef = bbox_loss_coef
+# 		self.giou_loss_coef = giou_loss_coef
+# 		self.focal_loss_coef = focal_loss_coef
+# 		self.eos_coef = eos_coef
+		
+# 		# Empty weight for focal loss (background class gets lower weight)
+# 		empty_weight = torch.ones(self.num_classes + 1)
+# 		empty_weight[-1] = self.eos_coef  # Last class is "no object"
+# 		self.register_buffer('empty_weight', empty_weight)
+	
+# 	def loss_labels(self, outputs, targets, indices):
+# 		"""Classification loss with focal loss."""
+# 		pred_logits = outputs['logits']  # [B, N, C]
+		
+# 		# No need to clamp - sigmoid handles -inf/+inf naturally
+		
+# 		idx = self._get_src_permutation_idx(indices)
+# 		target_classes_o = torch.cat([t["labels"][J] for t, (_, J) in zip(targets, indices)])
+# 		target_classes = torch.full(pred_logits.shape[:2], self.num_classes,
+# 								dtype=torch.int64, device=pred_logits.device)
+# 		target_classes[idx] = target_classes_o
+		
+# 		# Convert to one-hot for focal loss
+# 		target_classes_onehot = torch.zeros([pred_logits.shape[0], pred_logits.shape[1], pred_logits.shape[2] + 1],
+# 										dtype=pred_logits.dtype, layout=pred_logits.layout, device=pred_logits.device)
+# 		target_classes_onehot.scatter_(2, target_classes.unsqueeze(-1), 1)
+# 		target_classes_onehot = target_classes_onehot[:, :, :-1]  # Remove last class (no object)
+		
+# 		# Focal loss
+# 		pred_probs = pred_logits.sigmoid()
+# 		pt = torch.where(target_classes_onehot == 1, pred_probs, 1 - pred_probs)
+# 		focal_weight = self.alpha * (1 - pt) ** self.gamma
+		
+# 		bce_loss = F.binary_cross_entropy_with_logits(pred_logits, target_classes_onehot, reduction='none')
+# 		focal_loss = focal_weight * bce_loss
+		
+# 		return focal_loss.sum() / pred_logits.shape[0]
+	
+# 	def loss_boxes(self, outputs, targets, indices):
+# 		"""Bounding box losses: L1 and GIoU."""
+# 		idx = self._get_src_permutation_idx(indices)
+# 		pred_boxes = outputs['pred_boxes'][idx]  # [num_matched_queries, 4]
+# 		target_boxes = torch.cat([t['boxes'][i] for t, (_, i) in zip(targets, indices)], dim=0)
+		
+# 		if pred_boxes.shape[0] == 0:
+# 			return {
+# 				'loss_bbox': torch.tensor(0.0, device=pred_boxes.device, requires_grad=True),
+# 				'loss_giou': torch.tensor(0.0, device=pred_boxes.device, requires_grad=True)
+# 			}
+		
+# 		# L1 loss
+# 		loss_bbox = F.l1_loss(pred_boxes, target_boxes, reduction='none')
+# 		loss_bbox = loss_bbox.sum() / pred_boxes.shape[0]
+		
+# 		# GIoU loss
+# 		loss_giou = 1 - torch.diag(self.generalized_box_iou(
+# 			self.cxcywh_to_xyxy(pred_boxes),
+# 			self.cxcywh_to_xyxy(target_boxes)
+# 		))
+# 		loss_giou = loss_giou.sum() / pred_boxes.shape[0]
+		
+# 		return {'loss_bbox': loss_bbox, 'loss_giou': loss_giou}
+	
+# 	def _get_src_permutation_idx(self, indices):
+# 		"""Get indices for matched predictions across batch."""
+# 		batch_idx = torch.cat([torch.full_like(src, i) for i, (src, _) in enumerate(indices)])
+# 		src_idx = torch.cat([src for (src, _) in indices])
+# 		return batch_idx, src_idx
+	
+# 	def cxcywh_to_xyxy(self, boxes):
+# 		"""Convert boxes from cxcywh to xyxy format."""
+# 		cx, cy, w, h = boxes.unbind(-1)
+# 		x1 = cx - 0.5 * w
+# 		y1 = cy - 0.5 * h
+# 		x2 = cx + 0.5 * w
+# 		y2 = cy + 0.5 * h
+# 		return torch.stack([x1, y1, x2, y2], dim=-1)
+	
+# 	def generalized_box_iou(self, boxes1, boxes2):
+# 		"""Compute generalized IoU between two sets of boxes."""
+# 		# Intersection
+# 		lt = torch.max(boxes1[:, :2], boxes2[:, :2])
+# 		rb = torch.min(boxes1[:, 2:], boxes2[:, 2:])
+# 		wh = (rb - lt).clamp(min=0)
+# 		inter = wh[:, 0] * wh[:, 1]
+		
+# 		# Union
+# 		area1 = (boxes1[:, 2] - boxes1[:, 0]) * (boxes1[:, 3] - boxes1[:, 1])
+# 		area2 = (boxes2[:, 2] - boxes2[:, 0]) * (boxes2[:, 3] - boxes2[:, 1])
+# 		union = area1 + area2 - inter
+		
+# 		# IoU
+# 		iou = inter / union
+		
+# 		# Convex hull
+# 		lt_hull = torch.min(boxes1[:, :2], boxes2[:, :2])
+# 		rb_hull = torch.max(boxes1[:, 2:], boxes2[:, 2:])
+# 		wh_hull = (rb_hull - lt_hull).clamp(min=0)
+# 		convex_area = wh_hull[:, 0] * wh_hull[:, 1]
+		
+# 		# GIoU
+# 		giou = iou - (convex_area - union) / convex_area
+# 		return giou
+	
+# 	def forward(self, outputs, targets):
+# 		"""
+# 		Forward pass of the loss function.
+		
+# 		Args:
+# 			outputs: dict with 'pred_logits' [B, N, C] and 'pred_boxes' [B, N, 4]
+# 			targets: list of dicts, each with 'labels' [num_targets] and 'boxes' [num_targets, 4]
+			
+# 		Returns:
+# 			Dictionary containing individual losses and total loss
+# 		"""
+# 		# Perform Hungarian matching
+# 		indices = self.matcher(outputs, targets)
+		
+# 		# Compute losses
+# 		loss_labels = self.loss_labels(outputs, targets, indices)
+# 		loss_dict = self.loss_boxes(outputs, targets, indices)
+		
+# 		# Combine losses
+# 		total_loss = (
+# 			self.focal_loss_coef * loss_labels +
+# 			self.bbox_loss_coef * loss_dict['loss_bbox'] +
+# 			self.giou_loss_coef * loss_dict['loss_giou']
+# 		)
+		
+# 		return {
+# 			'total_loss': total_loss,
+# 			'loss_labels': loss_labels,
+# 			'loss_bbox': loss_dict['loss_bbox'],
+# 			'loss_giou': loss_dict['loss_giou']
+# 		}
+
+
+def cxcywh_to_xyxy(boxes):
+	"""Convert boxes from cxcywh to xyxy format."""
+	cx, cy, w, h = boxes.unbind(-1)
+	x1 = cx - 0.5 * w
+	y1 = cy - 0.5 * h
+	x2 = cx + 0.5 * w
+	y2 = cy + 0.5 * h
+	return torch.stack([x1, y1, x2, y2], dim=-1)
+
+
+class HungarianMatcher(nn.Module):
+	def __init__(self, cost_class=1.0, cost_bbox=5.0, cost_giou=2.0, use_focal=True, temperature=1.0):
+		"""
+		Args:
+			cost_class: weight for classification cost
+			cost_bbox: weight for L1 bbox cost
+			cost_giou: weight for GIoU cost
+			use_focal: whether to use focal loss-based matching
+			temperature: softmax temperature (used in softmax mode)
+		"""
 		super().__init__()
-		self.label_to_id = label_to_id
-		self.num_classes = len(label_to_id)
 		self.cost_class = cost_class
 		self.cost_bbox = cost_bbox
 		self.cost_giou = cost_giou
+		self.use_focal = use_focal
+		self.temperature = temperature
 
-		self.focal_loss = nn.BCEWithLogitsLoss(reduction='none')
-		self.l1_loss = nn.L1Loss(reduction='none')
+	@torch.no_grad()
+	def forward(self, pred_logits, pred_boxes, tgt_labels, tgt_boxes):
+		"""
+		Args:
+			pred_logits: (Q, C)
+			pred_boxes: (Q, 4)
+			tgt_labels: (T,)
+			tgt_boxes: (T, 4)
+		Returns:
+			indices: (pred_indices, tgt_indices)
+		"""
+		pred_boxes = cxcywh_to_xyxy(pred_boxes)
+		tgt_boxes = cxcywh_to_xyxy(tgt_boxes)
 
+		Q, C = pred_logits.shape
+		T = tgt_labels.shape[0]
 
-	def update_classes(self, label_to_id: Dict[str, int] = {}):
-		self.label_to_id = label_to_id
-		self.num_classes = len(label_to_id)
-
-
-	def generalized_box_iou(self, boxes1, boxes2):
-		"""Compute generalized IoU between two sets of boxes"""
-		# Ensure boxes are in xyxy format
-		if boxes1.shape[-1] == 4 and boxes2.shape[-1] == 4:
-			# Calculate intersection
-			lt = torch.max(boxes1[:, None, :2], boxes2[:, :2])  # [N, M, 2]
-			rb = torch.min(boxes1[:, None, 2:], boxes2[:, 2:])  # [N, M, 2]
-
-			wh = (rb - lt).clamp(min=0)  # [N, M, 2]
-			inter = wh[:, :, 0] * wh[:, :, 1]  # [N, M]
-
-			# Calculate areas
-			area1 = (boxes1[:, 2] - boxes1[:, 0]) * (boxes1[:, 3] - boxes1[:, 1])
-			area2 = (boxes2[:, 2] - boxes2[:, 0]) * (boxes2[:, 3] - boxes2[:, 1])
-			union = area1[:, None] + area2 - inter
-
-			# IoU
-			iou = inter / (union + 1e-6)
-
-			# Generalized IoU
-			lti = torch.min(boxes1[:, None, :2], boxes2[:, :2])
-			rbi = torch.max(boxes1[:, None, 2:], boxes2[:, 2:])
-			whi = (rbi - lti).clamp(min=0)
-			areai = whi[:, :, 0] * whi[:, :, 1]
-
-			giou = iou - (areai - union) / (areai + 1e-6)
-			return giou, iou
+		# Classification cost
+		if self.use_focal:
+			prob = torch.sigmoid(pred_logits)
+			tgt_onehot = torch.zeros_like(prob)
+			tgt_onehot[torch.arange(T), tgt_labels] = 1.0
+			alpha, gamma = 0.25, 2.0
+			p_t = prob[:, tgt_labels]
+			cls_cost = -alpha * (1 - p_t) ** gamma * torch.log(p_t + 1e-8)
+			cls_cost = cls_cost.T  # (T, Q)
 		else:
-			# Return dummy values if boxes are malformed
-			return torch.zeros((boxes1.shape[0], boxes2.shape[0]), device=boxes1.device), \
-				torch.zeros((boxes1.shape[0], boxes2.shape[0]), device=boxes1.device)
+			prob = F.softmax(pred_logits / self.temperature, dim=-1)
+			cls_cost = -prob[:, tgt_labels].T  # (T, Q)
 
-	def hungarian_matching(self, pred_boxes, pred_logits, target_boxes, target_labels):
-		"""Perform Hungarian matching between predictions and targets"""
-		batch_size = pred_boxes.shape[0]
-		indices = []
+		# L1 cost
+		bbox_cost = torch.cdist(pred_boxes, tgt_boxes, p=1)  # (Q, T)
 
-		for b in range(batch_size):
-			# Get predictions and targets for this batch
-			pred_box = pred_boxes[b]  # [num_queries, 4]
-			pred_logit = pred_logits[b]  # [num_queries, num_classes]
-			target_box = target_boxes[b]  # [num_targets, 4]
-			target_label = target_labels[b]  # [num_targets]
+		# GIoU cost
+		giou = generalized_box_iou(pred_boxes, tgt_boxes)  # (Q, T)
+		giou_cost = -giou
 
-			if len(target_box) == 0:
-				indices.append((torch.empty(0, dtype=torch.long, device=pred_box.device),
-							torch.empty(0, dtype=torch.long, device=pred_box.device)))
-				continue
+		# Final cost matrix: (T, Q)
+		C_matrix = (
+			self.cost_class * cls_cost +
+			self.cost_bbox * bbox_cost.T +
+			self.cost_giou * giou_cost.T
+		).cpu()
 
-			# Compute cost matrix
-			# Classification cost
-			alpha = 0.25
-			gamma = 2.0
-			neg_cost_class = (1 - alpha) * (pred_logit ** gamma) * (-(1 - pred_logit + 1e-8).log())
-			pos_cost_class = alpha * ((1 - pred_logit) ** gamma) * (-(pred_logit + 1e-8).log())
+		tgt_ind, pred_ind = linear_sum_assignment(C_matrix)
+		return torch.as_tensor(pred_ind, dtype=torch.int64), torch.as_tensor(tgt_ind, dtype=torch.int64)
 
-			# Create cost class matrix
-			cost_class = torch.zeros(pred_logit.shape[0], len(target_label), device=pred_logit.device)
-			for i, label_idx in enumerate(target_label):
-				if label_idx < pred_logit.shape[1]:
-					cost_class[:, i] = pos_cost_class[:, label_idx] - neg_cost_class[:, label_idx]
 
-			# Box costs
-			cost_bbox = torch.cdist(pred_box, target_box, p=1)  # L1 distance
+class GroundingDINOLoss(nn.Module):
+	def __init__(
+		self,
+		alpha=0.25,
+		gamma=2.0,
+		loss_weights=None,
+		class_weights=None,
+		temperature=1.0,
+		use_focal=True,
+		matcher=None,
+	):
+		"""
+		Args:
+			use_focal: If True, use sigmoid+focal; else use softmax+CE
+		"""
+		super().__init__()
+		self.alpha = alpha
+		self.gamma = gamma
+		self.class_weights = class_weights
+		self.temperature = temperature
+		self.use_focal = use_focal
 
-			# GIoU cost
-			try:
-				giou, _ = self.generalized_box_iou(pred_box, target_box)
-				cost_giou = -giou
-			except:
-				cost_giou = torch.ones_like(cost_bbox)
+		self.loss_weights = loss_weights or {
+			'loss_ce': 1.0,
+			'loss_bbox': 5.0,
+			'loss_giou': 2.0,
+		}
 
-			# Final cost matrix
-			C = self.cost_bbox * cost_bbox + self.cost_class * cost_class + self.cost_giou * cost_giou
+		self.matcher = matcher or HungarianMatcher(
+			cost_class=self.loss_weights["loss_ce"],
+			cost_bbox=self.loss_weights["loss_bbox"],
+			cost_giou=self.loss_weights["loss_giou"],
+			use_focal=use_focal,
+			temperature=temperature
+		)
 
-			# Hungarian matching
-			try:
-				pred_idx, target_idx = linear_sum_assignment(C.cpu().numpy())
-				indices.append((torch.tensor(pred_idx, dtype=torch.long, device=pred_box.device),
-							torch.tensor(target_idx, dtype=torch.long, device=pred_box.device)))
-			except:
-				# Fallback: match first N predictions to first N targets
-				num_matches = min(len(pred_box), len(target_box))
-				indices.append((torch.arange(num_matches, device=pred_box.device),
-							torch.arange(num_matches, device=pred_box.device)))
+	def sigmoid_focal_loss_old(self, logits, targets):
+		prob = torch.sigmoid(logits / self.temperature)
+		ce_loss = F.binary_cross_entropy_with_logits(logits / self.temperature, targets, weight=self.class_weights, reduction="none")
 
-		return indices
+		p_t = prob * targets + (1 - prob) * (1 - targets)
+		alpha_factor = self.alpha * targets + (1 - self.alpha) * (1 - targets)
+		modulating_factor = (1 - p_t) ** self.gamma
+
+		loss = alpha_factor * modulating_factor * ce_loss
+		return loss.sum() / logits.size(0)
+
+	def sigmoid_focal_loss(self, logits, targets):
+		"""
+		Numerically stable focal loss implementation.
+		logits: (N, C)
+		targets: (N, C) one-hot or multi-label binary vectors
+		"""
+		logits = logits / self.temperature
+		prob = torch.sigmoid(logits)
+
+		# Clamp probabilities for numerical stability
+		prob = prob.clamp(min=1e-6, max=1. - 1e-6)
+
+		ce_loss = -(
+			targets * torch.log(prob) +
+			(1 - targets) * torch.log(1 - prob)
+		)
+
+		p_t = prob * targets + (1 - prob) * (1 - targets)
+		alpha_factor = self.alpha * targets + (1 - self.alpha) * (1 - targets)
+		modulating_factor = (1 - p_t) ** self.gamma
+
+		loss = alpha_factor * modulating_factor * ce_loss
+		return loss.sum() / logits.size(0)
+
+	def box_loss(self, pred_boxes, target_boxes):
+		pred_boxes = cxcywh_to_xyxy(pred_boxes)
+		target_boxes = cxcywh_to_xyxy(target_boxes)
+		loss_bbox = F.l1_loss(pred_boxes, target_boxes, reduction="mean")
+		giou = generalized_box_iou(pred_boxes, target_boxes)
+		loss_giou = 1.0 - giou.diag().mean()
+		return loss_bbox, loss_giou
 
 	def forward(self, outputs, targets):
-		"""Compute detection loss"""
-		# Extract predictions - adapt based on actual GroundingDINO output structure
-		if hasattr(outputs, "logits") and hasattr(outputs, "pred_boxes"):
-			pred_logits = outputs.logits.sigmoid()  # [batch_size, num_queries, num_classes]
-			pred_boxes = outputs.pred_boxes  # [batch_size, num_queries, 4]
-		else:
-			# Fallback: create dummy predictions from last hidden state
-			hidden_states = outputs.last_hidden_state
-			batch_size, seq_len, hidden_dim = hidden_states.shape
+		pred_logits = outputs["logits"]  # (B, Q, C)
+		pred_boxes = outputs["pred_boxes"]    # (B, Q, 4)
+		B, Q, C = pred_logits.shape
 
-			# Create dummy predictions
-			pred_logits = torch.randn(batch_size, min(100, seq_len), self.num_classes, 
-									device=hidden_states.device, requires_grad=True)
-			pred_boxes = torch.sigmoid(torch.randn(batch_size, min(100, seq_len), 4, 
-												device=hidden_states.device, requires_grad=True))
+		total_ce, total_bbox, total_giou = 0.0, 0.0, 0.0
+		total_count = 0
 
-		# Prepare targets
-		target_boxes = []
-		target_labels = []
+		for i in range(B):
+			logits = pred_logits[i]      # (Q, C)
+			boxes = pred_boxes[i]        # (Q, 4)
+			tgt_labels = targets[i]["labels"]
+			tgt_boxes = targets[i]["boxes"]
 
-		for batch_item in targets:
-			boxes = batch_item["boxes"]  # Already normalized
-			labels = batch_item["labels"]
+			if tgt_labels.numel() == 0:
+				continue
 
-			label_indices = [self.label_to_id[label] for label in labels]
+			pred_ind, tgt_ind = self.matcher(logits, boxes, tgt_labels, tgt_boxes)
 
-			target_boxes.append(boxes)
-			target_labels.append(torch.tensor(label_indices, device=pred_boxes.device))
+			# Matched predictions and GTs
+			matched_logits = logits[pred_ind]
+			matched_boxes = boxes[pred_ind]
+			matched_tgt_labels = tgt_labels[tgt_ind]
+			matched_tgt_boxes = tgt_boxes[tgt_ind]
 
-		# Pad targets to same length
-		max_targets = max(len(tb) for tb in target_boxes) if target_boxes else 1
-
-		padded_target_boxes = []
-		padded_target_labels = []
-
-		for boxes, labels in zip(target_boxes, target_labels):
-			if len(boxes) == 0:
-				# Add dummy target if no boxes
-				padded_boxes = torch.zeros(1, 4, device=pred_boxes.device)
-				padded_labels = torch.zeros(1, dtype=torch.long, device=pred_boxes.device)
+			if self.use_focal:
+				target_logits = torch.zeros_like(matched_logits)
+				target_logits[torch.arange(len(matched_tgt_labels)), matched_tgt_labels] = 1.0
+				ce = self.sigmoid_focal_loss(matched_logits, target_logits)
 			else:
-				# Pad to max_targets
-				pad_size = max_targets - len(boxes)
-				if pad_size > 0:
-					padding_boxes = torch.zeros(pad_size, 4, device=pred_boxes.device)
-					padding_labels = torch.zeros(pad_size, dtype=torch.long, device=pred_boxes.device)
-					padded_boxes = torch.cat([boxes, padding_boxes])
-					padded_labels = torch.cat([labels, padding_labels])
-				else:
-					padded_boxes = boxes[:max_targets]
-					padded_labels = labels[:max_targets]
+				ce = F.cross_entropy(
+					matched_logits / self.temperature,
+					matched_tgt_labels,
+					weight=self.class_weights,
+				)
 
-			padded_target_boxes.append(padded_boxes)
-			padded_target_labels.append(padded_labels)
+			bbox_l, giou_l = self.box_loss(matched_boxes, matched_tgt_boxes)
 
-		# Perform matching
-		indices = self.hungarian_matching(pred_boxes, pred_logits, padded_target_boxes, padded_target_labels)
+			total_ce += ce
+			total_bbox += bbox_l
+			total_giou += giou_l
+			total_count += 1
 
-		# Compute losses
-		total_loss = 0
-		num_boxes = sum(len(t["boxes"]) for t in targets)
-		num_boxes = max(num_boxes, 1)  # Avoid division by zero
+		norm = max(total_count, 1)
 
-		# Classification loss
-		class_loss = 0
-		for i, (pred_idx, target_idx) in enumerate(indices):
-			if len(pred_idx) > 0:
-				selected_pred_logits = pred_logits[i][pred_idx]
-				selected_target_labels = padded_target_labels[i][target_idx]
-
-				# Focal loss
-				target_classes = torch.zeros_like(selected_pred_logits)
-				target_classes[range(len(selected_target_labels)), selected_target_labels] = 1
-
-				focal_loss = self.focal_loss(selected_pred_logits, target_classes)
-				class_loss += focal_loss.mean()
-
-		class_loss = class_loss / len(indices)
-
-		# Box regression loss
-		bbox_loss = 0
-		giou_loss = 0
-
-		for i, (pred_idx, target_idx) in enumerate(indices):
-			if len(pred_idx) > 0:
-				selected_pred_boxes = pred_boxes[i][pred_idx]
-				selected_target_boxes = padded_target_boxes[i][target_idx]
-
-				# L1 loss
-				bbox_loss += self.l1_loss(selected_pred_boxes, selected_target_boxes).mean()
-
-				# GIoU loss
-				try:
-					giou, _ = self.generalized_box_iou(selected_pred_boxes, selected_target_boxes)
-					giou_loss += (1 - torch.diag(giou)).mean()
-				except:
-					giou_loss += torch.tensor(0.0, device=pred_boxes.device, requires_grad=True)
-
-		bbox_loss = bbox_loss / len(indices)
-		giou_loss = giou_loss / len(indices)
-
-		# Combine losses
-		total_loss = self.cost_class * class_loss + self.cost_bbox * bbox_loss + self.cost_giou * giou_loss
+		loss = (
+			self.loss_weights["loss_ce"] * total_ce +
+			self.loss_weights["loss_bbox"] * total_bbox +
+			self.loss_weights["loss_giou"] * total_giou
+		) / norm
 
 		return {
-			"total_loss": total_loss,
-			"class_loss": class_loss,
-			"bbox_loss": bbox_loss,
-			"giou_loss": giou_loss
+			"total_loss": loss,
+			"class_loss": total_ce / norm,
+			"bbox_loss": total_bbox / norm,
+			"giou_loss": total_giou / norm,
 		}
 
 
@@ -613,7 +1136,16 @@ class GroundingDINOLoRAFineTuner:
 		self.model = AutoModelForZeroShotObjectDetection.from_pretrained(model_name)
 
 		# Initialize detection loss
-		self.criterion = DetectionLoss()
+		self.criterion = GroundingDINOLoss(
+			alpha=0.25,
+			gamma=2.0,
+			loss_weights=None,
+			class_weights=None,
+			temperature=1.0,
+			use_focal=True,
+			matcher=None,
+		)
+		# self.criterion = DetectionLoss()
 
 		if advanced_layers:
 			# Common attention and linear layer patterns
@@ -679,9 +1211,9 @@ class GroundingDINOLoRAFineTuner:
 		print(f"LoRA %: {100 * lora_params / total_params:.4f}%")
 
 
-	def create_dataloader(self, data_path: str, batch_size: int = 2, shuffle: bool = True):
+	def create_dataloader(self, data_path: str, label_to_id: Dict[str, int], batch_size: int = 2, shuffle: bool = True):
 		"""Create dataloader for training"""
-		dataset = GroundingDINODataset(data_path, self.processor)
+		dataset = GroundingDINODataset(data_path, label_to_id, self.processor)
 		return DataLoader(dataset, batch_size=batch_size, shuffle=shuffle, collate_fn=self.collate_fn)
 
 
@@ -701,6 +1233,7 @@ class GroundingDINOLoRAFineTuner:
 		input_ids = input_ids.to(self.device)  
 		attention_masks = attention_masks.to(self.device)
 		boxes = torch.tensor(boxes, dtype=torch.float32).to(self.device)
+		labels = torch.tensor(labels, dtype=torch.int64).to(self.device)
 
 		return {
 			"pixel_values": pixel_values,
@@ -831,13 +1364,12 @@ class GroundingDINOLoRAFineTuner:
 		"""Main fine-tuning method with LoRA and proper loss handling"""
 
 		# Create dataloaders
-		train_loader = self.create_dataloader(train_data_path, batch_size, shuffle=True)
+		label_to_id = build_label_mapping_from_files(train_data_path, val_data_path)
+		train_loader = self.create_dataloader(train_data_path, label_to_id, batch_size, shuffle=True)
 		val_loader = None
 		if val_data_path:
-			val_loader = self.create_dataloader(val_data_path, batch_size, shuffle=False)
-
-		label_to_id = build_label_mapping_from_files(train_data_path, val_data_path)
-		self.criterion.update_classes(label_to_id)
+			val_loader = self.create_dataloader(val_data_path, label_to_id, batch_size, shuffle=False)
+		# self.criterion.num_classes = len(label_to_id)
 
 		# Setup optimizer - only optimize LoRA parameters
 		lora_params = self.lora_manager.get_lora_parameters()
